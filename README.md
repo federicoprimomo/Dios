@@ -20,8 +20,12 @@ Anda en cualquier compu. Si tenés placa de video NVIDIA (o una Mac con chip M),
 ## Cómo usarla
 
 ```bash
-python -m dios
+python chatear.py
 ```
+
+Funciona desde cualquier carpeta (`python C:\ruta\a\dios\chatear.py`), y en Windows
+también con doble clic en `chatear.py`. Si estás parado en la carpeta del proyecto,
+`python -m dios` hace lo mismo.
 
 ```
 === Dios ===
