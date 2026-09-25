@@ -1,0 +1,206 @@
+"""El cerebro de Dios: empieza vacío y acumula todo lo que lee.
+
+Tiene dos partes:
+  * Memoria: guarda cada oración leída y la indexa (BM25) para poder
+    encontrar lo relevante cuando le hacés una pregunta.
+  * Lenguaje: una cadena de Markov que aprende cómo se encadenan las
+    palabras, para "imaginar" texto nuevo con el estilo de lo que leyó.
+
+Todo se guarda en un archivo JSON, así lo aprendido se suma sesión tras sesión.
+"""
+
+import json
+import math
+import random
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
+
+from . import texto as tx
+
+FIN = "\x03"  # marca de fin de oración en la cadena de Markov
+
+
+class Cerebro:
+    def __init__(self, archivo: str | Path | None = None):
+        self.archivo = Path(archivo) if archivo else None
+        self.lecturas: list[dict] = []  # historial de lo que leyó
+        self.recuerdos: list[dict] = []  # oraciones: {"texto", "fuente"}
+        self.cadena: dict[str, Counter] = defaultdict(Counter)
+        self.inicios: Counter = Counter()
+        self._reiniciar_indice()
+        if self.archivo and self.archivo.exists():
+            self.cargar()
+
+    # ------------------------------------------------------------ aprender
+    def aprender(self, contenido: str, fuente: str = "chat") -> int:
+        """Incorpora un texto. Devuelve cuántas oraciones nuevas aprendió."""
+        vistas = {r["texto"] for r in self.recuerdos}
+        nuevas = 0
+        for oracion in tx.oraciones(contenido):
+            self._aprender_lenguaje(oracion)
+            if oracion in vistas:
+                continue
+            vistas.add(oracion)
+            self.recuerdos.append({"texto": oracion, "fuente": fuente})
+            self._indexar(len(self.recuerdos) - 1)
+            nuevas += 1
+        if nuevas:
+            self.lecturas.append(
+                {
+                    "fuente": fuente,
+                    "oraciones": nuevas,
+                    "fecha": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            self.guardar()
+        return nuevas
+
+    def leer_archivo(self, ruta: str | Path) -> int:
+        """Lee un archivo de texto (o todos los .txt/.md de una carpeta)."""
+        ruta = Path(ruta).expanduser()
+        if ruta.is_dir():
+            return sum(
+                self.leer_archivo(p)
+                for p in sorted(ruta.rglob("*"))
+                if p.suffix.lower() in {".txt", ".md", ".text"}
+            )
+        contenido = ruta.read_text(encoding="utf-8", errors="replace")
+        return self.aprender(contenido, fuente=ruta.name)
+
+    def _aprender_lenguaje(self, oracion: str) -> None:
+        palabras = tx.palabras_originales(oracion)
+        if not palabras:
+            return
+        self.inicios[palabras[0]] += 1
+        secuencia = palabras + [FIN]
+        for i in range(len(palabras)):
+            anterior = secuencia[i - 1] if i > 0 else ""
+            clave = f"{anterior} {secuencia[i]}"
+            self.cadena[clave][secuencia[i + 1]] += 1
+
+    # ------------------------------------------------------------ índice BM25
+    def _reiniciar_indice(self) -> None:
+        self._indice: dict[str, dict[int, int]] = defaultdict(dict)
+        self._largos: list[int] = []
+
+    def _indexar(self, i: int) -> None:
+        palabras = tx.claves(self.recuerdos[i]["texto"])
+        self._largos.append(len(palabras))
+        for palabra, veces in Counter(palabras).items():
+            self._indice[palabra][i] = veces
+
+    def buscar(self, consulta: str, cuantos: int = 3) -> list[tuple[float, dict]]:
+        """Devuelve los recuerdos más relevantes para la consulta."""
+        n = len(self.recuerdos)
+        if not n:
+            return []
+        promedio = sum(self._largos) / n or 1
+        k1, b = 1.5, 0.75
+        puntajes: Counter = Counter()
+        for palabra in set(tx.claves(consulta)):
+            apariciones = self._indice.get(palabra)
+            if not apariciones:
+                continue
+            idf = math.log(1 + (n - len(apariciones) + 0.5) / (len(apariciones) + 0.5))
+            for i, veces in apariciones.items():
+                norma = k1 * (1 - b + b * self._largos[i] / promedio)
+                puntajes[i] += idf * veces * (k1 + 1) / (veces + norma)
+        return [(p, self.recuerdos[i]) for i, p in puntajes.most_common(cuantos)]
+
+    # ------------------------------------------------------------ hablar
+    def responder(self, pregunta: str) -> str:
+        if not self.recuerdos:
+            return (
+                "Todavía no sé nada. Estoy vacío. "
+                "Dame algo para leer con /leer <archivo> o enseñame con /aprender <texto>."
+            )
+        encontrados = self.buscar(pregunta, cuantos=5)
+        if not encontrados:
+            return (
+                "No aprendí nada sobre eso todavía. "
+                "Si me lo enseñás (/aprender ...), la próxima te sé responder."
+            )
+        mejor = encontrados[0][0]
+        elegidos = [r for p, r in encontrados if p >= mejor * 0.6][:3]
+        return " ".join(r["texto"] for r in elegidos)
+
+    def imaginar(self, semilla: str = "", largo_max: int = 40) -> str:
+        """Genera texto nuevo con lo que aprendió del lenguaje."""
+        if not self.inicios:
+            return "No tengo palabras todavía: necesito leer algo primero."
+        anterior, actual, prefijo = "", None, []
+        if semilla:
+            ultima = tx.normalizar(semilla.split()[-1])
+            candidatas = [
+                c.split(" ", 1)[1]
+                for c in self.cadena
+                if tx.normalizar(c.split(" ", 1)[1]).strip(".,;:!?¿¡\"'()") == ultima
+            ]
+            if candidatas:
+                actual = random.choice(candidatas)
+                prefijo = semilla.split()[:-1]
+                anterior = prefijo[-1] if prefijo else ""
+        if actual is None:
+            actual = random.choices(list(self.inicios), weights=self.inicios.values())[0]
+        salida = [actual]
+        while len(salida) < largo_max:
+            opciones = self.cadena.get(f"{anterior} {actual}")
+            if not opciones:
+                # probamos con cualquier contexto que termine en la palabra actual
+                opciones = Counter()
+                for clave, siguientes in self.cadena.items():
+                    if clave.endswith(" " + actual):
+                        opciones.update(siguientes)
+            if not opciones:
+                break
+            siguiente = random.choices(list(opciones), weights=opciones.values())[0]
+            if siguiente == FIN:
+                break
+            salida.append(siguiente)
+            anterior, actual = actual, siguiente
+        return " ".join(prefijo + salida)
+
+    # ------------------------------------------------------------ estado
+    def estado(self) -> dict:
+        return {
+            "oraciones": len(self.recuerdos),
+            "palabras_distintas": len(self._indice),
+            "lecturas": len(self.lecturas),
+            "fuentes": sorted({l["fuente"] for l in self.lecturas}),
+        }
+
+    def olvidar(self) -> None:
+        """Vuelve a dejar el cerebro vacío."""
+        self.lecturas, self.recuerdos = [], []
+        self.cadena, self.inicios = defaultdict(Counter), Counter()
+        self._reiniciar_indice()
+        self.guardar()
+
+    # ------------------------------------------------------------ persistencia
+    def guardar(self) -> None:
+        if not self.archivo:
+            return
+        self.archivo.parent.mkdir(parents=True, exist_ok=True)
+        datos = {
+            "version": 1,
+            "lecturas": self.lecturas,
+            "recuerdos": self.recuerdos,
+            "cadena": {k: dict(v) for k, v in self.cadena.items()},
+            "inicios": dict(self.inicios),
+        }
+        temporal = self.archivo.with_suffix(".tmp")
+        temporal.write_text(json.dumps(datos, ensure_ascii=False), encoding="utf-8")
+        temporal.replace(self.archivo)
+
+    def cargar(self) -> None:
+        datos = json.loads(self.archivo.read_text(encoding="utf-8"))
+        self.lecturas = datos.get("lecturas", [])
+        self.recuerdos = datos.get("recuerdos", [])
+        self.cadena = defaultdict(
+            Counter, {k: Counter(v) for k, v in datos.get("cadena", {}).items()}
+        )
+        self.inicios = Counter(datos.get("inicios", {}))
+        self._reiniciar_indice()
+        for i in range(len(self.recuerdos)):
+            self._indexar(i)
