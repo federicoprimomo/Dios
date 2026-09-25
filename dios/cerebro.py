@@ -12,6 +12,7 @@ Todo se guarda en un archivo JSON, así lo aprendido se suma sesión tras sesió
 import json
 import math
 import random
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -90,23 +91,59 @@ class Cerebro:
         for palabra, veces in Counter(palabras).items():
             self._indice[palabra][i] = veces
 
-    def buscar(self, consulta: str, cuantos: int = 3) -> list[tuple[float, int]]:
-        """Devuelve (puntaje, índice) de los recuerdos más relevantes."""
+    def _comunes(self) -> set[str]:
+        """Palabras que aparecen en casi todas partes ("el", "de", "que"...).
+
+        No vienen de ninguna lista: las descubre solo, mirando lo que leyó.
+        Con poca lectura todavía no sabe cuáles son, y no ignora ninguna.
+        """
+        n = len(self.recuerdos)
+        if n < 8:
+            return set()
+        return {p for p, apariciones in self._indice.items() if len(apariciones) > n * 0.5}
+
+    def _variantes(self, palabra: str) -> dict[str, float]:
+        """Palabras que conoce y se parecen a esta (perro/perros, planeta/planetas).
+
+        Se basa sólo en que compartan el comienzo, sin reglas del idioma.
+        """
+        variantes = {palabra: 1.0} if palabra in self._indice else {}
+        if len(palabra) >= 4:
+            for conocida in self._indice:
+                if conocida != palabra and len(conocida) >= 4 and abs(len(conocida) - len(palabra)) <= 3:
+                    if conocida.startswith(palabra) or palabra.startswith(conocida):
+                        variantes[conocida] = 0.7
+        return variantes
+
+    def buscar(self, consulta: str, cuantos: int = 3) -> list[tuple[float, int, float, bool]]:
+        """Devuelve (puntaje, índice, cobertura, relevante) de los mejores recuerdos.
+
+        cobertura: cuánto de la consulta tiene la oración (las palabras raras pesan más).
+        relevante: si comparte con la consulta alguna palabra que no sea de las comunes.
+        """
         n = len(self.recuerdos)
         if not n:
             return []
         promedio = sum(self._largos) / n or 1
         k1, b = 1.5, 0.75
+        comunes = self._comunes()
         puntajes: Counter = Counter()
-        for palabra in set(tx.claves(consulta)):
-            apariciones = self._indice.get(palabra)
-            if not apariciones:
-                continue
-            idf = math.log(1 + (n - len(apariciones) + 0.5) / (len(apariciones) + 0.5))
-            for i, veces in apariciones.items():
-                norma = k1 * (1 - b + b * self._largos[i] / promedio)
-                puntajes[i] += idf * veces * (k1 + 1) / (veces + norma)
-        return [(p, i) for i, p in puntajes.most_common(cuantos)]
+        cobertura: dict[int, dict[str, float]] = defaultdict(dict)
+        relevante: set[int] = set()
+        for buscada in set(tx.claves(consulta)):
+            for palabra, peso in self._variantes(buscada).items():
+                apariciones = self._indice[palabra]
+                idf = math.log(1 + (n - len(apariciones) + 0.5) / (len(apariciones) + 0.5))
+                for i, veces in apariciones.items():
+                    norma = k1 * (1 - b + b * self._largos[i] / promedio)
+                    puntajes[i] += peso * idf * veces * (k1 + 1) / (veces + norma)
+                    cobertura[i][buscada] = max(cobertura[i].get(buscada, 0), peso * idf)
+                    if palabra not in comunes:
+                        relevante.add(i)
+        return [
+            (p, i, sum(cobertura[i].values()), i in relevante)
+            for i, p in puntajes.most_common(cuantos)
+        ]
 
     # ------------------------------------------------------------ hablar
     def responder(self, pregunta: str) -> str:
@@ -116,38 +153,41 @@ class Cerebro:
                 "Dame algo para leer con /leer <archivo> o enseñame con /aprender <texto>."
             )
         encontrados = self.buscar(pregunta, cuantos=5)
+        encontrados = [e for e in encontrados if e[3]]
+        desconocidas = [
+            p for p in dict.fromkeys(re.findall(r"\w+", pregunta.lower()))
+            if not self._variantes(tx.normalizar(p))
+        ]
+        aviso = f"(Nunca leí: {', '.join(desconocidas)}.) " if desconocidas else ""
         if not encontrados:
             return (
-                "No aprendí nada sobre eso todavía. "
+                aviso + "No aprendí nada sobre eso todavía. "
                 "Si me lo enseñás (/aprender ...), la próxima te sé responder."
             )
-        buscadas = set(tx.claves(pregunta))
-
-        def cobertura(i: int) -> int:
-            return len(buscadas & set(tx.claves(self.recuerdos[i]["texto"])))
-
         # Nos quedamos con las oraciones que cubren más palabras de la pregunta
         # y que tienen un puntaje parecido al de la mejor.
-        maxima = max(cobertura(i) for _, i in encontrados)
+        maxima = max(c for _, _, c, _ in encontrados)
         mejor = encontrados[0][0]
         elegidos = [
-            i for p, i in encontrados if p >= mejor * 0.6 and cobertura(i) == maxima
+            i for p, i, c, _ in encontrados if p >= mejor * 0.6 and c >= maxima * 0.85
         ][:3]
         # Sumamos la oración que sigue en el mismo texto si también habla del tema:
         # muchas veces la respuesta continúa ahí ("Se hace cocinando...").
+        relacionadas = {
+            i for _, i, _, r in self.buscar(pregunta, cuantos=len(self.recuerdos)) if r
+        }
         con_contexto = []
         for i in elegidos:
             if i not in con_contexto:
                 con_contexto.append(i)
             siguiente = i + 1
             if (
-                siguiente < len(self.recuerdos)
+                siguiente in relacionadas
                 and siguiente not in con_contexto
                 and self.recuerdos[siguiente]["fuente"] == self.recuerdos[i]["fuente"]
-                and buscadas & set(tx.claves(self.recuerdos[siguiente]["texto"]))
             ):
                 con_contexto.append(siguiente)
-        return " ".join(self.recuerdos[i]["texto"] for i in con_contexto[:4])
+        return aviso + " ".join(self.recuerdos[i]["texto"] for i in con_contexto[:4])
 
     def imaginar(self, semilla: str = "", largo_max: int = 40) -> str:
         """Genera texto nuevo con lo que aprendió del lenguaje."""

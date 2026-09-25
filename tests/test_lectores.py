@@ -7,7 +7,7 @@ from dios import Cerebro
 from dios.chat import leer_pegado, procesar
 from dios.lectores import ErrorDeLectura, _limpiar_pagina, extraer_texto
 
-EJEMPLOS = Path(__file__).parent.parent / "ejemplos"
+EJEMPLOS = Path(__file__).parent / "datos"
 HAY_PYPDF = importlib.util.find_spec("pypdf") is not None
 
 

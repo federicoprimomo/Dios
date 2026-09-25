@@ -1,25 +1,13 @@
-"""Utilidades para procesar texto en español: normalizar, separar oraciones y palabras."""
+"""Utilidades mecánicas para partir texto en oraciones y palabras.
+
+A propósito no hay acá ningún conocimiento del idioma (ni listas de palabras,
+ni reglas de gramática): todo lo que Dios sabe lo aprende de lo que lee.
+"""
 
 import re
 import unicodedata
 
-PALABRAS_VACIAS = set(
-    """
-    a al algo algun alguna algunas alguno algunos ante antes aqui asi aun
-    bajo bien cada casi como con contra cual cuales cuando de del desde donde
-    dos el ella ellas ello ellos en entre era eran es esa esas ese eso esos
-    esta estaba estan estar estas este esto estos fue fueron ha haber habia
-    hace hacia han hasta hay la las le les lo los mas me mi mis mucho muy
-    nada ni no nos nosotros o os otra otras otro otros para pero poco por porque
-    que quien quienes se sea ser si sido sin sobre son su sus tambien tan
-    tanto te tener tiene tienen toda todas todo todos tu tus un una unas uno
-    unos usted vos y ya yo cual cuales decime dime sabes sabe saber contame
-    cuentame explicame explica queres quiero puedes podes
-    the of and to in is it that for on with as are was be by this
-    """.split()
-)
-
-_PALABRA = re.compile(r"[a-z0-9ñ]+")
+_PALABRA = re.compile(r"\w+")
 _FIN_ORACION = re.compile(r"(?<=[.!?…])\s+|\n\s*\n|\n(?=\s*[-*•\d])")
 
 
@@ -31,21 +19,9 @@ def normalizar(texto: str) -> str:
     return texto.replace("\0", "ñ")
 
 
-def raiz(palabra: str) -> str:
-    """Stemming muy liviano: junta singular/plural y algunas terminaciones."""
-    for sufijo in ("mente", "ciones", "cion", "idades", "idad", "es", "s"):
-        if palabra.endswith(sufijo) and len(palabra) - len(sufijo) >= 4:
-            return palabra[: -len(sufijo)]
-    return palabra
-
-
 def claves(texto: str) -> list[str]:
-    """Palabras significativas de un texto, listas para indexar o buscar."""
-    return [
-        raiz(p)
-        for p in _PALABRA.findall(normalizar(texto))
-        if p not in PALABRAS_VACIAS and len(p) > 1
-    ]
+    """Todas las palabras de un texto, normalizadas, para indexar o buscar."""
+    return _PALABRA.findall(normalizar(texto))
 
 
 def oraciones(texto: str) -> list[str]:
