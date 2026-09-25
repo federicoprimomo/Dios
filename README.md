@@ -47,7 +47,7 @@ dios > (continúa el texto con el estilo de lo que leyó)
 
 | Comando | Qué hace |
 |---|---|
-| `/leer <archivo o carpeta>` | Lee un `.txt`, `.md` o `.pdf` (o todos los de una carpeta) y se entrena con eso |
+| `/leer <archivo o carpeta>` | Lee un `.txt`, `.md`, `.pdf` o `.zip` (o todos los de una carpeta) y se entrena con eso |
 | `/aprender <texto>` | Se entrena con el texto que escribas |
 | `recordá que ...` | Otra forma de enseñarle algo mientras chateás |
 | `/pegar` | Pegás un texto largo (varias líneas) y terminás con `/fin` |
@@ -55,7 +55,8 @@ dios > (continúa el texto con el estilo de lo que leyó)
 | `/imaginar [inicio]` | Escribe libremente, empezando por lo que le des |
 | `/temperatura <n>` | 0.3 = prudente y repetitivo, 1.0 = creativo y caótico (por defecto 0.8) |
 | `/estado` | Tamaño de la red, cuánto leyó, cuánto se entrenó y qué tan bien escribe |
-| `/olvidar si` | Vuelve a nacer vacía (guarda una copia en `memoria/olvidados/`) |
+| `/olvidar <archivo>` | Olvida sólo ese texto y se reentrena con el resto (ej: `/olvidar chat.txt`) |
+| `/olvidar si` | Olvida todo y vuelve a nacer vacía (guarda una copia en `memoria/olvidados/`) |
 | `/salir` | Termina (lo aprendido queda guardado) |
 
 Cualquier otra cosa que escribas, la red la **continúa**: escribe lo que, según lo que
@@ -79,6 +80,30 @@ especiales. Esta es la misma idea, a escala de tu compu.
 **Para que aprenda a conversar**, dale textos con forma de conversación: por ejemplo,
 diálogos, o un archivo con preguntas y respuestas separadas por una línea en blanco.
 La red aprende a responder de la manera en que están escritos los textos que lee.
+
+## Chats de WhatsApp
+
+Exportá el chat desde WhatsApp (chat → ⋮ → Más → Exportar chat → **Sin archivos**) y dáselo
+con `/leer`. Dios se da cuenta solo de que es un WhatsApp (Android o iPhone, `.txt` o `.zip`) y lo limpia:
+
+- saca fechas, horas, avisos automáticos, `<Multimedia omitido>`, mensajes eliminados y adjuntos,
+- une los mensajes de varios renglones,
+- deja una línea en blanco entre charlas separadas por más de 3 horas.
+
+Queda así, que es lo que la red estudia:
+
+```
+Federico: llegaste?
+Ana: sii recién, estoy muerta jaja
+```
+
+Para chatear, escribí igual que en el chat. Dios contesta como la otra persona y corta
+cuando te vuelve a tocar a vos:
+
+```
+vos > Federico: hola amor, cómo estuvo tu día?
+dios > Ana: bien, cansada jaja. vos?
+```
 
 ## Tamaños
 

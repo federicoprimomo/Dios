@@ -81,7 +81,7 @@ class TestCerebro(unittest.TestCase):
         c = self.nuevo()
         chat = Chat(c, progreso=sin_barra)
         c.aprender("No me olvides.", pasos=5)
-        self.assertIn("Seguro", chat.procesar("/olvidar"))
+        self.assertIn("/olvidar si", chat.procesar("/olvidar"))
         self.assertEqual(self.nuevo().pasos, 5)
         self.assertIn("nacer", chat.procesar("/olvidar si"))
         self.assertEqual(self.nuevo().pasos, 0)

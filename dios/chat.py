@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .cerebro import Cerebro
-from .lectores import ErrorDeLectura
+from .lectores import ErrorDeLectura, preparar
 from .red import TAMANOS, perdida_a_texto
 
 AYUDA = """\
@@ -18,7 +18,8 @@ Comandos:
   /imaginar [inicio]          Escribo libremente, empezando por lo que me des
   /temperatura <número>       Qué tan arriesgado escribo: 0.3 prudente, 1.0 creativo (ahora {temp})
   /estado                     Te cuento cuánto sé
-  /olvidar si                 Vuelvo a nacer vacío (guardo una copia de lo anterior)
+  /olvidar <archivo>          Olvido sólo ese texto y me reentreno con el resto (ej: /olvidar chat.txt)
+  /olvidar si                 Olvido TODO y vuelvo a nacer vacío (guardo una copia de lo anterior)
   /ayuda                      Muestra esta ayuda
   /salir                      Termina el chat
 
@@ -108,8 +109,23 @@ class Chat:
                     f"{desde}"
                 )
             if comando == "/olvidar":
+                fuentes = c.estado()["fuentes"]
+                if not argumento:
+                    lista = "\n".join(f"  /olvidar {f}" for f in fuentes) or "  (no leí nada todavía)"
+                    return (
+                        "¿Qué querés que olvide? Puedo olvidar un solo texto:\n"
+                        f"{lista}\n"
+                        "o TODO y volver a nacer vacío: /olvidar si"
+                    )
                 if argumento.lower() not in ("si", "sí"):
-                    return "¿Seguro? Voy a volver a nacer vacío. Si estás seguro escribí: /olvidar si"
+                    nombre = Path(argumento.strip("\"'")).name
+                    if nombre.lower() not in (f.lower() for f in fuentes):
+                        return f"No leí nada llamado '{nombre}'. Leí: {', '.join(fuentes) or 'nada'}."
+                    sacadas = c.olvidar_fuente(nombre, progreso=self.progreso)
+                    return (
+                        f"Olvidé {nombre} ({sacadas} lectura/s) y me volví a entrenar con el resto. "
+                        + (self.aprendido(c.pasos) if c.pasos else "No me quedó nada: estoy vacío.")
+                    )
                 copia = c.olvidar()
                 donde = f" Guardé una copia de lo anterior en {copia}." if copia else ""
                 return "Volví a nacer: no sé nada." + donde
@@ -171,7 +187,8 @@ def main() -> None:
             break
         if entrada.strip().lower() == "/pegar":
             print("Pegá el texto. Cuando termines escribí /fin en una línea sola.")
-            pasos = cerebro.aprender(leer_pegado(), fuente="texto pegado", progreso=barra)
+            texto = preparar(leer_pegado())
+            pasos = cerebro.aprender(texto, fuente="texto pegado", progreso=barra)
             print(f"dios > {chat.aprendido(pasos)}\n")
             continue
         respuesta = chat.procesar(entrada)

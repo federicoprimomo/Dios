@@ -12,6 +12,7 @@ desde cero con el diario.
 
 import json
 import random
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -157,7 +158,16 @@ class Cerebro:
             )
         inicio = (mensaje.strip() + "\n").encode("utf-8")
         texto = self.red.generar(inicio, largo=largo, temperatura=temperatura, parar_en=SEPARADOR)
-        return texto.decode("utf-8", errors="ignore").strip()
+        respuesta = texto.decode("utf-8", errors="ignore").strip()
+        # Si escribiste como en un chat ("Federico: hola"), corta cuando te toca a vos otra vez.
+        quien = re.match(r"^([^:\n]{1,40}):\s", mensaje.strip())
+        if quien:
+            lineas = respuesta.splitlines()
+            for i, linea in enumerate(lineas):
+                if i > 0 and linea.startswith(quien.group(1) + ":"):
+                    respuesta = "\n".join(lineas[:i])
+                    break
+        return respuesta
 
     def imaginar(self, inicio: str = "", largo: int = 400, temperatura: float = 0.8) -> str:
         """Escribe libremente, empezando (o no) por las palabras que le des."""
@@ -192,6 +202,41 @@ class Cerebro:
                     shutil.move(p, copia / p.name)
         self._nacer(self.red.config)
         return copia
+
+    def olvidar_fuente(self, fuente: str, progreso: Progreso | None = None) -> int:
+        """Olvida un solo texto (por ejemplo "chat.txt") y conserva todo lo demás.
+
+        Una red no puede "desaprender" una parte, así que vuelve a nacer y se
+        entrena de nuevo con todo lo del diario menos ese texto. Guarda una copia
+        de cómo estaba antes en memoria/olvidados/. Devuelve cuántas lecturas sacó.
+        """
+        entradas = self._leer_diario()
+        quedan = [e for e in entradas if e["fuente"].lower() != fuente.lower()]
+        sacadas = len(entradas) - len(quedan)
+        if not sacadas:
+            return 0
+        if self.archivo:
+            marca = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            copia = self.archivo.parent / "olvidados" / marca
+            copia.mkdir(parents=True, exist_ok=True)
+            for p in (self.archivo, self.diario):
+                if p.exists():
+                    shutil.copy2(p, copia / p.name)
+            temporal = self.diario.with_suffix(".tmp")
+            temporal.write_text(
+                "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in quedan),
+                encoding="utf-8",
+            )
+            temporal.replace(self.diario)
+            self._reconstruir_desde_diario(progreso)
+        else:
+            self._nacer(self.red.config)
+            for e in quedan:
+                self._incorporar(e["texto"], e["fuente"], e["fecha"])
+            if self.corpus:
+                self.entrenar(self.pasos_sugeridos(len(self.corpus)), progreso=progreso)
+        self.reconstruido = False
+        return sacadas
 
     # ------------------------------------------------------------ persistencia
     def _anotar_en_diario(self, entrada: dict) -> None:

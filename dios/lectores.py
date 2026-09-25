@@ -1,14 +1,24 @@
 """Sacan el texto de los distintos tipos de archivo que Dios sabe leer."""
 
 import re
+import zipfile
 from pathlib import Path
 
+from . import whatsapp
+
 EXTENSIONES_TEXTO = {".txt", ".md", ".text"}
-EXTENSIONES = EXTENSIONES_TEXTO | {".pdf"}
+EXTENSIONES = EXTENSIONES_TEXTO | {".pdf", ".zip"}
 
 
 class ErrorDeLectura(Exception):
     """El archivo no se pudo leer (formato no soportado, PDF escaneado, etc.)."""
+
+
+def preparar(texto: str) -> str:
+    """Limpia el texto según lo que sea (por ahora: chats de WhatsApp)."""
+    if whatsapp.es_whatsapp(texto):
+        return whatsapp.limpiar(texto)
+    return texto
 
 
 def extraer_texto(ruta: str | Path) -> str:
@@ -16,11 +26,29 @@ def extraer_texto(ruta: str | Path) -> str:
     extension = ruta.suffix.lower()
     if extension == ".pdf":
         return _leer_pdf(ruta)
+    if extension == ".zip":
+        return _leer_zip(ruta)
     if extension in EXTENSIONES_TEXTO or not extension:
-        return ruta.read_text(encoding="utf-8", errors="replace")
+        return preparar(ruta.read_text(encoding="utf-8-sig", errors="replace"))
     raise ErrorDeLectura(
         f"No sé leer archivos {extension}. Por ahora leo: {', '.join(sorted(EXTENSIONES))}"
     )
+
+
+def _leer_zip(ruta: Path) -> str:
+    """Los textos dentro de un .zip (así exporta WhatsApp en iPhone: _chat.txt)."""
+    try:
+        with zipfile.ZipFile(ruta) as z:
+            textos = [
+                z.read(n).decode("utf-8-sig", errors="replace")
+                for n in sorted(z.namelist())
+                if Path(n).suffix.lower() in EXTENSIONES_TEXTO and not n.startswith("__MACOSX")
+            ]
+    except zipfile.BadZipFile:
+        raise ErrorDeLectura("El .zip está dañado o no es un zip.") from None
+    if not textos:
+        raise ErrorDeLectura("El .zip no tiene archivos de texto adentro.")
+    return "\n\n".join(preparar(t) for t in textos)
 
 
 def _leer_pdf(ruta: Path) -> str:
