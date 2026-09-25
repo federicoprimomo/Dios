@@ -1,116 +1,101 @@
+import random
 import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 from dios import Cerebro
-from dios.chat import procesar
+from dios.chat import Chat
+
+REPETIDO = "El gato duerme en la cama. " * 40
+
+
+def sin_barra(*_):
+    pass
 
 
 class TestCerebro(unittest.TestCase):
     def setUp(self):
+        torch.manual_seed(0)
+        random.seed(0)
         self.tmp = tempfile.TemporaryDirectory()
-        self.archivo = Path(self.tmp.name) / "cerebro.json"
+        self.archivo = Path(self.tmp.name) / "cerebro.pt"
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_empieza_vacio(self):
-        c = Cerebro(self.archivo)
-        self.assertEqual(c.estado()["oraciones"], 0)
-        self.assertIn("vacío", c.responder("¿Qué es el Sol?"))
+    def nuevo(self):
+        return Cerebro(self.archivo, tamano="diminuto")
 
-    def test_aprende_y_responde(self):
-        c = Cerebro(self.archivo)
-        c.aprender("Los gatos duermen mucho. Los perros ladran a los carteros.")
-        self.assertIn("gatos", c.responder("¿Qué hacen los gatos?"))
-        self.assertIn("perros", c.responder("perro"))
+    def test_nace_vacio_y_al_azar(self):
+        c = self.nuevo()
+        e = c.estado()
+        self.assertEqual((e["pasos"], e["bytes_leidos"], e["perdida"]), (0, 0, None))
+        self.assertIn("vacío", c.responder("hola"))
+        # dos redes recién nacidas son distintas: pesos al azar, nada preentrenado
+        otra = Cerebro(tamano="diminuto")
+        self.assertFalse(torch.equal(c.red.letras.weight, otra.red.letras.weight))
 
-    def test_no_viene_preentrenado(self):
-        c = Cerebro(self.archivo)
-        self.assertEqual(c.estado(), {"oraciones": 0, "palabras_distintas": 0, "lecturas": 0, "fuentes": [], "desde": None})
-        self.assertIn("No tengo palabras", c.imaginar())
-
-    def test_aprende_un_idioma_inventado(self):
-        # No trae conocimiento de ningún idioma: aprende igual uno que no existe.
-        c = Cerebro(self.archivo)
-        c.aprender("Blorg zintapo fe kramu. Quarnel mip dolo sefa.")
-        self.assertIn("Blorg", c.responder("zintapo"))
-        self.assertIn("Quarnel", c.responder("dolo mip"))
-        self.assertIn("Nunca leí: gato", c.responder("gato"))
-
-    def test_no_sabe_lo_que_no_aprendio(self):
-        c = Cerebro(self.archivo)
-        c.aprender("Los gatos duermen mucho.")
-        self.assertIn("No aprendí", c.responder("¿Qué es un volcán?"))
+    def test_aprende_de_lo_que_lee(self):
+        c = self.nuevo()
+        c.aprender(REPETIDO, pasos=5)
+        perdida_inicial = c.perdida
+        c.entrenar(300)
+        self.assertLess(c.perdida, perdida_inicial / 2)
+        self.assertIn("duerme", c.imaginar("El gato", temperatura=0.1, largo=40))
 
     def test_acumula_entre_sesiones(self):
-        Cerebro(self.archivo).aprender("Buenos Aires es la capital de Argentina.")
-        c = Cerebro(self.archivo)
-        c.aprender("Montevideo es la capital de Uruguay.")
-        c = Cerebro(self.archivo)
-        self.assertEqual(c.estado()["oraciones"], 2)
-        self.assertIn("Uruguay", c.responder("capital de uruguay"))
-        self.assertIn("Argentina", c.responder("capital de argentina"))
+        c = self.nuevo()
+        c.aprender("Primer texto.", pasos=10)
+        pesos = c.red.letras.weight.detach().clone()
+        c = self.nuevo()  # otra sesión
+        self.assertEqual(c.pasos, 10)
+        self.assertTrue(torch.equal(c.red.letras.weight, pesos))
+        c.aprender("Segundo texto.", pasos=10)
+        c = self.nuevo()
+        self.assertEqual(c.pasos, 20)
+        self.assertEqual(c.estado()["lecturas"], 2)
+        self.assertIn(b"Primer texto.", c.corpus)
+        self.assertIn(b"Segundo texto.", c.corpus)
 
-    def test_no_duplica(self):
-        c = Cerebro(self.archivo)
-        self.assertEqual(c.aprender("El agua moja."), 1)
-        self.assertEqual(c.aprender("El agua moja."), 0)
-
-    def test_leer_archivo_e_imaginar(self):
-        c = Cerebro(self.archivo)
-        ejemplo = Path(__file__).parent / "datos" / "sistema_solar.txt"
-        self.assertGreater(c.leer_archivo(ejemplo), 5)
-        self.assertIn("Júpiter", c.responder("¿Cuál es el planeta más grande?"))
-        self.assertTrue(c.imaginar())
-
-    def test_acumula_en_muchas_sesiones(self):
-        for dia in range(1, 6):
-            Cerebro(self.archivo).aprender(f"El dato número {dia} es importante.")
-        c = Cerebro(self.archivo)
-        self.assertEqual(c.estado()["oraciones"], 5)
-        self.assertEqual(c.estado()["lecturas"], 5)
-        self.assertIn("número 1", c.responder("dato 1"))
-        self.assertIn("número 5", c.responder("dato 5"))
+    def test_repasa_lo_viejo_al_aprender_lo_nuevo(self):
+        c = self.nuevo()
+        c.aprender("a" * 500, pasos=1)
+        desde = c._incorporar("b" * 500, "x", "f")
+        x, _ = c._lote(32, desde)
+        filas_viejas = sum(1 for fila in x.tolist() if ord("a") in fila)
+        self.assertGreaterEqual(filas_viejas, 8)  # repasa lo anterior
+        self.assertGreaterEqual(32 - filas_viejas, 8)  # y estudia lo nuevo
 
     def test_se_reconstruye_si_la_memoria_se_dana(self):
-        Cerebro(self.archivo).aprender("Toby es mi perro.")
-        Cerebro(self.archivo).aprender("Michi es mi gato.")
-        self.archivo.write_text("{basura", encoding="utf-8")
-        c = Cerebro(self.archivo)
+        self.nuevo().aprender("Toby es mi perro.", pasos=5)
+        self.archivo.write_bytes(b"basura")
+        c = self.nuevo()
         self.assertTrue(c.reconstruido)
-        self.assertIn("Toby", c.responder("Toby"))
-        self.assertIn("Michi", c.responder("Michi"))
-        # y quedó sano para la próxima
-        self.assertFalse(Cerebro(self.archivo).reconstruido)
+        self.assertGreater(c.pasos, 0)
+        self.assertIn(b"Toby", c.corpus)
+        self.assertFalse(self.nuevo().reconstruido)
 
-    def test_se_reconstruye_si_la_memoria_se_borra(self):
-        Cerebro(self.archivo).aprender("Toby es mi perro.")
-        self.archivo.unlink()
-        self.assertIn("Toby", Cerebro(self.archivo).responder("Toby"))
+    def test_olvidar(self):
+        c = self.nuevo()
+        chat = Chat(c, progreso=sin_barra)
+        c.aprender("No me olvides.", pasos=5)
+        self.assertIn("Seguro", chat.procesar("/olvidar"))
+        self.assertEqual(self.nuevo().pasos, 5)
+        self.assertIn("nacer", chat.procesar("/olvidar si"))
+        self.assertEqual(self.nuevo().pasos, 0)
+        self.assertTrue(list((Path(self.tmp.name) / "olvidados").glob("*/cerebro_diario.jsonl")))
 
-    def test_olvidar_guarda_una_copia(self):
-        c = Cerebro(self.archivo)
-        c.aprender("Algo para olvidar.")
-        copia = c.olvidar()
-        self.assertEqual(Cerebro(self.archivo).estado()["oraciones"], 0)
-        self.assertTrue((copia / "cerebro_diario.jsonl").exists())
-        # después de olvidar vuelve a acumular desde cero
-        c.aprender("Algo nuevo.")
-        self.assertEqual(Cerebro(self.archivo).estado()["oraciones"], 1)
-
-    def test_olvidar_pide_confirmacion(self):
-        c = Cerebro(self.archivo)
-        c.aprender("No me olvides.")
-        self.assertIn("Seguro", procesar(c, "/olvidar"))
-        self.assertEqual(Cerebro(self.archivo).estado()["oraciones"], 1)
-        self.assertIn("Olvidé", procesar(c, "/olvidar si"))
-
-    def test_chat_ensenar_con_frase(self):
-        c = Cerebro(self.archivo)
-        procesar(c, "recordá que mi color favorito es el verde")
-        self.assertIn("verde", procesar(c, "¿cuál es mi color favorito?"))
-        self.assertIsNone(procesar(c, "/salir"))
+    def test_chat(self):
+        c = self.nuevo()
+        chat = Chat(c, progreso=sin_barra)
+        self.assertIn("Me entrené", chat.procesar("recordá que el cielo es azul"))
+        self.assertIn(b"El cielo es azul", c.corpus)
+        self.assertIn("Me entrené 20 pasos", chat.procesar("/entrenar 20"))
+        self.assertIn("parámetros", chat.procesar("/estado"))
+        self.assertIsInstance(chat.procesar("hola"), str)
+        self.assertIsNone(chat.procesar("/salir"))
 
 
 if __name__ == "__main__":

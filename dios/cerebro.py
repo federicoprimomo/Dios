@@ -1,267 +1,187 @@
-"""El cerebro de Dios: empieza vacío y acumula todo lo que lee.
+"""El cerebro de Dios: una red neuronal que nace vacía y aprende de lo que lee.
 
-Tiene dos partes:
-  * Memoria: guarda cada oración leída y la indexa (BM25) para poder
-    encontrar lo relevante cuando le hacés una pregunta.
-  * Lenguaje: una cadena de Markov que aprende cómo se encadenan las
-    palabras, para "imaginar" texto nuevo con el estilo de lo que leyó.
+Es acumulativo:
+  * cerebro.pt: los pesos de la red (lo que aprendió) y cuánto se entrenó.
+  * cerebro_diario.jsonl: todo lo que leyó, en orden y nunca borrado.
 
-Es acumulativo: todo se guarda y lo aprendido se suma sesión tras sesión.
-  * cerebro.json: el estado completo, para arrancar rápido.
-  * cerebro_diario.jsonl: cada cosa que leyó, anotada en orden y nunca borrada.
-    Si cerebro.json se pierde o se daña, el cerebro se reconstruye desde el diario.
+Cuando le das algo nuevo, se entrena con eso pero también repasa lo que ya había
+leído, para no olvidarlo (a las redes neuronales les pasa: si sólo estudian lo
+nuevo, pisan lo viejo). Si cerebro.pt se pierde o se daña, se vuelve a entrenar
+desde cero con el diario.
 """
 
 import json
-import math
 import random
-import re
 import shutil
-from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
+
+import torch
 
 from . import lectores
-from . import texto as tx
+from .red import TAMANOS, Config, Red
 
-FIN = "\x03"  # marca de fin de oración en la cadena de Markov
+SEPARADOR = b"\n\n"
+Progreso = Callable[[int, int, float], None]  # (paso, total, pérdida)
+
+
+def _dispositivo() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 class Cerebro:
-    def __init__(self, archivo: str | Path | None = None):
+    def __init__(self, archivo: str | Path | None = None, tamano: str = "chico",
+                 progreso: Progreso | None = None):
         self.archivo = Path(archivo) if archivo else None
         self.diario = (
             self.archivo.with_name(self.archivo.stem + "_diario.jsonl") if self.archivo else None
         )
-        self.lecturas: list[dict] = []  # historial de lo que leyó
-        self.recuerdos: list[dict] = []  # oraciones: {"texto", "fuente"}
-        self.cadena: dict[str, Counter] = defaultdict(Counter)
-        self.inicios: Counter = Counter()
-        self._reiniciar_indice()
+        self.dispositivo = _dispositivo()
+        self.tamano = tamano
         self.reconstruido = False
+        self._nacer(TAMANOS[tamano])
         if self.archivo and self.archivo.exists():
             try:
                 self.cargar()
-            except (ValueError, KeyError, TypeError, OSError):
-                self._reconstruir_desde_diario()
+            except Exception:  # archivo dañado: lo rehacemos desde el diario
+                self._reconstruir_desde_diario(progreso)
         elif self.diario and self.diario.exists():
-            self._reconstruir_desde_diario()
+            self._reconstruir_desde_diario(progreso)
+
+    def _nacer(self, config: Config) -> None:
+        """Una red nueva, con pesos al azar: no sabe absolutamente nada."""
+        self.red = Red(config).to(self.dispositivo)
+        self.optimizador = torch.optim.AdamW(self.red.parameters(), lr=1e-3, weight_decay=0.01)
+        self.corpus = bytearray()  # todo lo leído, en bytes
+        self.lecturas: list[dict] = []
+        self.pasos = 0
+        self.perdida: float | None = None
 
     # ------------------------------------------------------------ aprender
-    def aprender(self, contenido: str, fuente: str = "chat") -> int:
-        """Incorpora un texto a lo que ya sabe. Devuelve cuántas oraciones nuevas aprendió."""
-        if not contenido.strip():
+    def aprender(self, contenido: str, fuente: str = "chat", pasos: int | None = None,
+                 progreso: Progreso | None = None) -> int:
+        """Suma un texto a lo que sabe y entrena la red con él.
+
+        Devuelve cuántos pasos de entrenamiento hizo.
+        """
+        contenido = contenido.strip()
+        if not contenido:
             return 0
         fecha = datetime.now().isoformat(timespec="seconds")
         self._anotar_en_diario({"fecha": fecha, "fuente": fuente, "texto": contenido})
-        nuevas = self._incorporar(contenido, fuente, fecha)
-        self.guardar()
-        return nuevas
+        desde = self._incorporar(contenido, fuente, fecha)
+        nuevos = len(self.corpus) - desde
+        return self.entrenar(pasos or self.pasos_sugeridos(nuevos), desde=desde,
+                             progreso=progreso)
 
-    def _incorporar(self, contenido: str, fuente: str, fecha: str) -> int:
-        vistas = {r["texto"] for r in self.recuerdos}
-        nuevas = 0
-        for oracion in tx.oraciones(contenido):
-            self._aprender_lenguaje(oracion)
-            if oracion in vistas:
-                continue
-            vistas.add(oracion)
-            self.recuerdos.append({"texto": oracion, "fuente": fuente})
-            self._indexar(len(self.recuerdos) - 1)
-            nuevas += 1
-        if nuevas:
-            self.lecturas.append(
-                {
-                    "fuente": fuente,
-                    "oraciones": nuevas,
-                    "fecha": fecha,
-                }
-            )
-        return nuevas
-
-    def leer_archivo(self, ruta: str | Path) -> int:
+    def leer_archivo(self, ruta: str | Path, progreso: Progreso | None = None) -> int:
         """Lee un archivo de texto o PDF (o todos los de una carpeta)."""
         ruta = Path(ruta).expanduser()
         if ruta.is_dir():
             return sum(
-                self.leer_archivo(p)
+                self.leer_archivo(p, progreso)
                 for p in sorted(ruta.rglob("*"))
                 if p.suffix.lower() in lectores.EXTENSIONES
             )
-        return self.aprender(lectores.extraer_texto(ruta), fuente=ruta.name)
+        return self.aprender(lectores.extraer_texto(ruta), fuente=ruta.name, progreso=progreso)
 
-    def _aprender_lenguaje(self, oracion: str) -> None:
-        palabras = tx.palabras_originales(oracion)
-        if not palabras:
-            return
-        self.inicios[palabras[0]] += 1
-        secuencia = palabras + [FIN]
-        for i in range(len(palabras)):
-            anterior = secuencia[i - 1] if i > 0 else ""
-            clave = f"{anterior} {secuencia[i]}"
-            self.cadena[clave][secuencia[i + 1]] += 1
+    @staticmethod
+    def pasos_sugeridos(bytes_nuevos: int) -> int:
+        """Cuánto estudiar un texto nuevo según su largo."""
+        return max(60, min(2000, bytes_nuevos // 8))
 
-    # ------------------------------------------------------------ índice BM25
-    def _reiniciar_indice(self) -> None:
-        self._indice: dict[str, dict[int, int]] = defaultdict(dict)
-        self._largos: list[int] = []
+    def _incorporar(self, contenido: str, fuente: str, fecha: str) -> int:
+        """Agrega el texto al corpus. Devuelve dónde empieza lo nuevo."""
+        desde = len(self.corpus)
+        self.corpus += contenido.encode("utf-8") + SEPARADOR
+        self.lecturas.append({"fuente": fuente, "fecha": fecha, "bytes": len(self.corpus) - desde})
+        return desde
 
-    def _indexar(self, i: int) -> None:
-        palabras = tx.claves(self.recuerdos[i]["texto"])
-        self._largos.append(len(palabras))
-        for palabra, veces in Counter(palabras).items():
-            self._indice[palabra][i] = veces
+    # ------------------------------------------------------------ entrenar
+    def _lote(self, tamano: int, desde: int | None):
+        largo = min(self.red.config.contexto, len(self.corpus) - 1)
+        datos = self.corpus
+        inicios = []
+        hay_nuevo = desde is not None and len(datos) - desde > largo + 1
+        hay_viejo = desde is not None and desde > largo + 1
+        for j in range(tamano):
+            # mitad del lote estudia lo nuevo, la otra mitad repasa lo anterior
+            if hay_nuevo and (j % 2 == 0 or not hay_viejo):
+                inicios.append(random.randint(desde, len(datos) - largo - 1))
+            elif hay_viejo:
+                inicios.append(random.randint(0, desde - largo - 1))
+            else:
+                inicios.append(random.randint(0, len(datos) - largo - 1))
+        x = torch.tensor([list(datos[i:i + largo]) for i in inicios], dtype=torch.long)
+        y = torch.tensor([list(datos[i + 1:i + largo + 1]) for i in inicios], dtype=torch.long)
+        return x.to(self.dispositivo), y.to(self.dispositivo)
 
-    def _comunes(self) -> set[str]:
-        """Palabras que aparecen en casi todas partes ("el", "de", "que"...).
-
-        No vienen de ninguna lista: las descubre solo, mirando lo que leyó.
-        Con poca lectura todavía no sabe cuáles son, y no ignora ninguna.
-        """
-        n = len(self.recuerdos)
-        if n < 8:
-            return set()
-        return {p for p, apariciones in self._indice.items() if len(apariciones) > n * 0.5}
-
-    def _variantes(self, palabra: str) -> dict[str, float]:
-        """Palabras que conoce y se parecen a esta (perro/perros, planeta/planetas).
-
-        Se basa sólo en que compartan el comienzo, sin reglas del idioma.
-        """
-        variantes = {palabra: 1.0} if palabra in self._indice else {}
-        if len(palabra) >= 4:
-            for conocida in self._indice:
-                if conocida != palabra and len(conocida) >= 4 and abs(len(conocida) - len(palabra)) <= 3:
-                    if conocida.startswith(palabra) or palabra.startswith(conocida):
-                        variantes[conocida] = 0.7
-        return variantes
-
-    def buscar(self, consulta: str, cuantos: int = 3) -> list[tuple[float, int, float, bool]]:
-        """Devuelve (puntaje, índice, cobertura, relevante) de los mejores recuerdos.
-
-        cobertura: cuánto de la consulta tiene la oración (las palabras raras pesan más).
-        relevante: si comparte con la consulta alguna palabra que no sea de las comunes.
-        """
-        n = len(self.recuerdos)
-        if not n:
-            return []
-        promedio = sum(self._largos) / n or 1
-        k1, b = 1.5, 0.75
-        comunes = self._comunes()
-        puntajes: Counter = Counter()
-        cobertura: dict[int, dict[str, float]] = defaultdict(dict)
-        relevante: set[int] = set()
-        for buscada in set(tx.claves(consulta)):
-            for palabra, peso in self._variantes(buscada).items():
-                apariciones = self._indice[palabra]
-                idf = math.log(1 + (n - len(apariciones) + 0.5) / (len(apariciones) + 0.5))
-                for i, veces in apariciones.items():
-                    norma = k1 * (1 - b + b * self._largos[i] / promedio)
-                    puntajes[i] += peso * idf * veces * (k1 + 1) / (veces + norma)
-                    cobertura[i][buscada] = max(cobertura[i].get(buscada, 0), peso * idf)
-                    if palabra not in comunes:
-                        relevante.add(i)
-        return [
-            (p, i, sum(cobertura[i].values()), i in relevante)
-            for i, p in puntajes.most_common(cuantos)
-        ]
+    def entrenar(self, pasos: int, desde: int | None = None, tamano_lote: int = 32,
+                 progreso: Progreso | None = None) -> int:
+        """Entrena la red. Se puede cortar con Ctrl+C: lo aprendido hasta ahí queda."""
+        if len(self.corpus) < 3:
+            return 0
+        self.red.train()
+        hechos = 0
+        try:
+            for paso in range(1, pasos + 1):
+                x, y = self._lote(tamano_lote, desde)
+                _, perdida = self.red(x, y)
+                self.optimizador.zero_grad(set_to_none=True)
+                perdida.backward()
+                torch.nn.utils.clip_grad_norm_(self.red.parameters(), 1.0)
+                self.optimizador.step()
+                valor = perdida.item()
+                self.perdida = valor if self.perdida is None else 0.95 * self.perdida + 0.05 * valor
+                self.pasos += 1
+                hechos = paso
+                if progreso and (paso % 10 == 0 or paso == pasos):
+                    progreso(paso, pasos, self.perdida)
+        except KeyboardInterrupt:
+            pass
+        self.guardar()
+        return hechos
 
     # ------------------------------------------------------------ hablar
-    def responder(self, pregunta: str) -> str:
-        if not self.recuerdos:
+    def responder(self, mensaje: str, largo: int = 300, temperatura: float = 0.8) -> str:
+        """La red continúa escribiendo a partir de tu mensaje."""
+        if not self.pasos:
             return (
-                "Todavía no sé nada. Estoy vacío. "
-                "Dame algo para leer con /leer <archivo> o enseñame con /aprender <texto>."
+                "(Estoy vacío: nunca me entrené con nada. Dame algo para leer con "
+                "/leer <archivo> o /aprender <texto>.)"
             )
-        encontrados = self.buscar(pregunta, cuantos=5)
-        encontrados = [e for e in encontrados if e[3]]
-        desconocidas = [
-            p for p in dict.fromkeys(re.findall(r"\w+", pregunta.lower()))
-            if not self._variantes(tx.normalizar(p))
-        ]
-        aviso = f"(Nunca leí: {', '.join(desconocidas)}.) " if desconocidas else ""
-        if not encontrados:
-            return (
-                aviso + "No aprendí nada sobre eso todavía. "
-                "Si me lo enseñás (/aprender ...), la próxima te sé responder."
-            )
-        # Nos quedamos con las oraciones que cubren más palabras de la pregunta
-        # y que tienen un puntaje parecido al de la mejor.
-        maxima = max(c for _, _, c, _ in encontrados)
-        mejor = encontrados[0][0]
-        elegidos = [
-            i for p, i, c, _ in encontrados if p >= mejor * 0.6 and c >= maxima * 0.85
-        ][:3]
-        # Sumamos la oración que sigue en el mismo texto si también habla del tema:
-        # muchas veces la respuesta continúa ahí ("Se hace cocinando...").
-        relacionadas = {
-            i for _, i, _, r in self.buscar(pregunta, cuantos=len(self.recuerdos)) if r
-        }
-        con_contexto = []
-        for i in elegidos:
-            if i not in con_contexto:
-                con_contexto.append(i)
-            siguiente = i + 1
-            if (
-                siguiente in relacionadas
-                and siguiente not in con_contexto
-                and self.recuerdos[siguiente]["fuente"] == self.recuerdos[i]["fuente"]
-            ):
-                con_contexto.append(siguiente)
-        return aviso + " ".join(self.recuerdos[i]["texto"] for i in con_contexto[:4])
+        inicio = (mensaje.strip() + "\n").encode("utf-8")
+        texto = self.red.generar(inicio, largo=largo, temperatura=temperatura, parar_en=SEPARADOR)
+        return texto.decode("utf-8", errors="ignore").strip()
 
-    def imaginar(self, semilla: str = "", largo_max: int = 40) -> str:
-        """Genera texto nuevo con lo que aprendió del lenguaje."""
-        if not self.inicios:
-            return "No tengo palabras todavía: necesito leer algo primero."
-        anterior, actual, prefijo = "", None, []
-        if semilla:
-            ultima = tx.normalizar(semilla.split()[-1])
-            candidatas = [
-                c.split(" ", 1)[1]
-                for c in self.cadena
-                if tx.normalizar(c.split(" ", 1)[1]).strip(".,;:!?¿¡\"'()") == ultima
-            ]
-            if candidatas:
-                actual = random.choice(candidatas)
-                prefijo = semilla.split()[:-1]
-                anterior = prefijo[-1] if prefijo else ""
-        if actual is None:
-            actual = random.choices(list(self.inicios), weights=self.inicios.values())[0]
-        salida = [actual]
-        while len(salida) < largo_max:
-            opciones = self.cadena.get(f"{anterior} {actual}")
-            if not opciones:
-                # probamos con cualquier contexto que termine en la palabra actual
-                opciones = Counter()
-                for clave, siguientes in self.cadena.items():
-                    if clave.endswith(" " + actual):
-                        opciones.update(siguientes)
-            if not opciones:
-                break
-            siguiente = random.choices(list(opciones), weights=opciones.values())[0]
-            if siguiente == FIN:
-                break
-            salida.append(siguiente)
-            anterior, actual = actual, siguiente
-        return " ".join(prefijo + salida)
+    def imaginar(self, inicio: str = "", largo: int = 400, temperatura: float = 0.8) -> str:
+        """Escribe libremente, empezando (o no) por las palabras que le des."""
+        if not self.pasos:
+            return "(Estoy vacío: todavía no sé escribir nada.)"
+        texto = self.red.generar(inicio.encode("utf-8"), largo=largo, temperatura=temperatura)
+        return (inicio + texto.decode("utf-8", errors="ignore")).strip()
 
     # ------------------------------------------------------------ estado
     def estado(self) -> dict:
         return {
-            "oraciones": len(self.recuerdos),
-            "palabras_distintas": len(self._indice),
+            "parametros": self.red.parametros(),
+            "tamano": self.tamano,
+            "bytes_leidos": len(self.corpus),
             "lecturas": len(self.lecturas),
             "fuentes": sorted({l["fuente"] for l in self.lecturas}),
+            "pasos": self.pasos,
+            "perdida": self.perdida,
             "desde": self.lecturas[0]["fecha"] if self.lecturas else None,
+            "dispositivo": self.dispositivo,
         }
 
     def olvidar(self) -> Path | None:
-        """Vuelve a dejar el cerebro vacío.
-
-        No borra nada: guarda una copia de lo aprendido en memoria/olvidados/
-        y devuelve esa carpeta, por si después lo querés recuperar.
-        """
+        """Vuelve a nacer vacío. Guarda una copia de lo anterior en memoria/olvidados/."""
         copia = None
         if self.archivo and any(p.exists() for p in (self.archivo, self.diario)):
             marca = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -270,27 +190,10 @@ class Cerebro:
             for p in (self.archivo, self.diario):
                 if p.exists():
                     shutil.move(p, copia / p.name)
-        self.lecturas, self.recuerdos = [], []
-        self.cadena, self.inicios = defaultdict(Counter), Counter()
-        self._reiniciar_indice()
+        self._nacer(self.red.config)
         return copia
 
     # ------------------------------------------------------------ persistencia
-    def guardar(self) -> None:
-        if not self.archivo:
-            return
-        self.archivo.parent.mkdir(parents=True, exist_ok=True)
-        datos = {
-            "version": 1,
-            "lecturas": self.lecturas,
-            "recuerdos": self.recuerdos,
-            "cadena": {k: dict(v) for k, v in self.cadena.items()},
-            "inicios": dict(self.inicios),
-        }
-        temporal = self.archivo.with_suffix(".tmp")
-        temporal.write_text(json.dumps(datos, ensure_ascii=False), encoding="utf-8")
-        temporal.replace(self.archivo)
-
     def _anotar_en_diario(self, entrada: dict) -> None:
         if not self.diario:
             return
@@ -298,29 +201,51 @@ class Cerebro:
         with self.diario.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
 
-    def _reconstruir_desde_diario(self) -> None:
-        """Vuelve a aprender, en orden, todo lo anotado en el diario."""
-        self.lecturas, self.recuerdos = [], []
-        self.cadena, self.inicios = defaultdict(Counter), Counter()
-        self._reiniciar_indice()
+    def _leer_diario(self) -> list[dict]:
+        entradas = []
         if self.diario and self.diario.exists():
             for linea in self.diario.read_text(encoding="utf-8").splitlines():
                 try:
-                    e = json.loads(linea)
+                    entradas.append(json.loads(linea))
                 except ValueError:
                     continue  # una línea dañada no arruina el resto
-                self._incorporar(e["texto"], e["fuente"], e["fecha"])
+        return entradas
+
+    def _reconstruir_desde_diario(self, progreso: Progreso | None = None) -> None:
+        """Nace de nuevo y vuelve a estudiar, en orden, todo lo del diario."""
+        self._nacer(TAMANOS[self.tamano])
+        for e in self._leer_diario():
+            self._incorporar(e["texto"], e["fuente"], e["fecha"])
         self.reconstruido = True
-        self.guardar()
+        if self.corpus:
+            self.entrenar(self.pasos_sugeridos(len(self.corpus)), progreso=progreso)
+
+    def guardar(self) -> None:
+        if not self.archivo:
+            return
+        self.archivo.parent.mkdir(parents=True, exist_ok=True)
+        temporal = self.archivo.with_suffix(".tmp")
+        torch.save(
+            {
+                "version": 2,
+                "config": self.red.config.como_dict(),
+                "tamano": self.tamano,
+                "red": self.red.state_dict(),
+                "optimizador": self.optimizador.state_dict(),
+                "pasos": self.pasos,
+                "perdida": self.perdida,
+            },
+            temporal,
+        )
+        temporal.replace(self.archivo)
 
     def cargar(self) -> None:
-        datos = json.loads(self.archivo.read_text(encoding="utf-8"))
-        self.lecturas = datos.get("lecturas", [])
-        self.recuerdos = datos.get("recuerdos", [])
-        self.cadena = defaultdict(
-            Counter, {k: Counter(v) for k, v in datos.get("cadena", {}).items()}
-        )
-        self.inicios = Counter(datos.get("inicios", {}))
-        self._reiniciar_indice()
-        for i in range(len(self.recuerdos)):
-            self._indexar(i)
+        datos = torch.load(self.archivo, map_location=self.dispositivo, weights_only=True)
+        self.tamano = datos.get("tamano", self.tamano)
+        self._nacer(Config(**datos["config"]))
+        self.red.load_state_dict(datos["red"])
+        self.optimizador.load_state_dict(datos["optimizador"])
+        self.pasos, self.perdida = datos["pasos"], datos["perdida"]
+        # el texto leído vive en el diario (la red lo necesita para repasar)
+        for e in self._leer_diario():
+            self._incorporar(e["texto"], e["fuente"], e["fecha"])

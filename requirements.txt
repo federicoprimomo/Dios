@@ -1,1 +1,2 @@
-pypdf>=4.0  # solo hace falta para leer PDFs
+torch>=2.1   # la red neuronal
+pypdf>=4.0   # para leer PDFs
