@@ -3,7 +3,11 @@
 Una inteligencia artificial que **empieza vacía** y aprende de todo lo que le das para leer.
 Todo lo que aprende se guarda, así que sesión tras sesión va sumando conocimiento.
 
-Hecho en Python puro: no necesita instalar nada, ni internet, ni GPU.
+Hecho en Python puro: no necesita internet ni GPU. Para leer PDFs hace falta una sola librería:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Cómo usarlo
 
@@ -17,6 +21,9 @@ Estoy vacío. Enseñame algo.
 
 vos > /leer ejemplos/sistema_solar.txt
 dios > Listo, leí sistema_solar.txt y aprendí 9 oraciones nuevas.
+
+vos > /leer ejemplos/oceanos.pdf
+dios > Listo, leí oceanos.pdf y aprendí 8 oraciones nuevas.
 
 vos > ¿cuál es el planeta más grande?
 dios > Júpiter es el planeta más grande del sistema solar.
@@ -32,7 +39,8 @@ dios > Plutón fue degradado a planeta enano en 2006
 
 | Comando | Qué hace |
 |---|---|
-| `/leer <archivo o carpeta>` | Lee un `.txt`/`.md` (o todos los de una carpeta) y lo aprende |
+| `/leer <archivo o carpeta>` | Lee un `.txt`, `.md` o `.pdf` (o todos los de una carpeta) y lo aprende |
+| `/pegar` | Pegás un texto largo (varias líneas) y termina con `/fin` |
 | `/aprender <texto>` | Aprende el texto que escribas |
 | `recordá que ...` / `aprendé que ...` | Otra forma de enseñarle algo mientras chateás |
 | `/imaginar [palabras]` | Inventa texto nuevo con el estilo de lo que leyó |
@@ -61,6 +69,7 @@ python -m unittest
 
 ## Ideas para seguir
 
-- Leer PDFs y páginas web.
+- Leer páginas web y documentos de Word.
+- Leer PDFs escaneados (necesita OCR).
 - Usar *embeddings* para que entienda sinónimos ("auto" ≈ "coche").
 - Conectarlo a un modelo de lenguaje grande para que redacte respuestas con lo que tiene en la memoria (RAG).

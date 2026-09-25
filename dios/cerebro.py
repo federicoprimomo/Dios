@@ -16,6 +16,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from . import lectores
 from . import texto as tx
 
 FIN = "\x03"  # marca de fin de oración en la cadena de Markov
@@ -57,16 +58,15 @@ class Cerebro:
         return nuevas
 
     def leer_archivo(self, ruta: str | Path) -> int:
-        """Lee un archivo de texto (o todos los .txt/.md de una carpeta)."""
+        """Lee un archivo de texto o PDF (o todos los de una carpeta)."""
         ruta = Path(ruta).expanduser()
         if ruta.is_dir():
             return sum(
                 self.leer_archivo(p)
                 for p in sorted(ruta.rglob("*"))
-                if p.suffix.lower() in {".txt", ".md", ".text"}
+                if p.suffix.lower() in lectores.EXTENSIONES
             )
-        contenido = ruta.read_text(encoding="utf-8", errors="replace")
-        return self.aprender(contenido, fuente=ruta.name)
+        return self.aprender(lectores.extraer_texto(ruta), fuente=ruta.name)
 
     def _aprender_lenguaje(self, oracion: str) -> None:
         palabras = tx.palabras_originales(oracion)
@@ -90,8 +90,8 @@ class Cerebro:
         for palabra, veces in Counter(palabras).items():
             self._indice[palabra][i] = veces
 
-    def buscar(self, consulta: str, cuantos: int = 3) -> list[tuple[float, dict]]:
-        """Devuelve los recuerdos más relevantes para la consulta."""
+    def buscar(self, consulta: str, cuantos: int = 3) -> list[tuple[float, int]]:
+        """Devuelve (puntaje, índice) de los recuerdos más relevantes."""
         n = len(self.recuerdos)
         if not n:
             return []
@@ -106,7 +106,7 @@ class Cerebro:
             for i, veces in apariciones.items():
                 norma = k1 * (1 - b + b * self._largos[i] / promedio)
                 puntajes[i] += idf * veces * (k1 + 1) / (veces + norma)
-        return [(p, self.recuerdos[i]) for i, p in puntajes.most_common(cuantos)]
+        return [(p, i) for i, p in puntajes.most_common(cuantos)]
 
     # ------------------------------------------------------------ hablar
     def responder(self, pregunta: str) -> str:
@@ -122,8 +122,23 @@ class Cerebro:
                 "Si me lo enseñás (/aprender ...), la próxima te sé responder."
             )
         mejor = encontrados[0][0]
-        elegidos = [r for p, r in encontrados if p >= mejor * 0.6][:3]
-        return " ".join(r["texto"] for r in elegidos)
+        elegidos = [i for p, i in encontrados if p >= mejor * 0.6][:3]
+        # Sumamos la oración que sigue en el mismo texto si también habla del tema:
+        # muchas veces la respuesta continúa ahí ("Se hace cocinando...").
+        buscadas = set(tx.claves(pregunta))
+        con_contexto = []
+        for i in elegidos:
+            if i not in con_contexto:
+                con_contexto.append(i)
+            siguiente = i + 1
+            if (
+                siguiente < len(self.recuerdos)
+                and siguiente not in con_contexto
+                and self.recuerdos[siguiente]["fuente"] == self.recuerdos[i]["fuente"]
+                and buscadas & set(tx.claves(self.recuerdos[siguiente]["texto"]))
+            ):
+                con_contexto.append(siguiente)
+        return " ".join(self.recuerdos[i]["texto"] for i in con_contexto[:4])
 
     def imaginar(self, semilla: str = "", largo_max: int = 40) -> str:
         """Genera texto nuevo con lo que aprendió del lenguaje."""

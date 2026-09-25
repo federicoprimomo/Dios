@@ -5,11 +5,13 @@ import re
 from pathlib import Path
 
 from .cerebro import Cerebro
+from .lectores import ErrorDeLectura
 
 AYUDA = """\
 Comandos:
-  /leer <archivo o carpeta>   Leo un .txt/.md (o todos los de una carpeta) y lo aprendo
+  /leer <archivo o carpeta>   Leo un .txt, .md o .pdf (o todos los de una carpeta) y lo aprendo
   /aprender <texto>           Aprendo el texto que escribas
+  /pegar                      Pegás un texto largo (varias líneas) y lo aprendo; terminás con /fin
   /imaginar [palabras]        Invento texto con el estilo de lo que leí
   /estado                     Te cuento cuánto sé
   /olvidar                    Borro todo lo aprendido (vuelvo a estar vacío)
@@ -40,7 +42,10 @@ def procesar(cerebro: Cerebro, entrada: str) -> str | None:
             ruta = Path(argumento.strip("\"'")).expanduser()
             if not ruta.exists():
                 return f"No encuentro '{ruta}'."
-            n = cerebro.leer_archivo(ruta)
+            try:
+                n = cerebro.leer_archivo(ruta)
+            except ErrorDeLectura as error:
+                return str(error)
             return f"Listo, leí {ruta.name} y aprendí {n} oraciones nuevas."
         if comando in ("/aprender", "/enseñar", "/ensenar"):
             if not argumento:
@@ -70,6 +75,20 @@ def procesar(cerebro: Cerebro, entrada: str) -> str | None:
     return cerebro.responder(entrada)
 
 
+def leer_pegado(leer_linea=input) -> str:
+    """Junta líneas hasta que el usuario escribe /fin."""
+    lineas = []
+    while True:
+        try:
+            linea = leer_linea("... ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if linea.strip().lower() == "/fin":
+            break
+        lineas.append(linea)
+    return "\n".join(lineas)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Chateá con Dios, una IA que empieza vacía.")
     parser.add_argument(
@@ -94,6 +113,11 @@ def main() -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        if entrada.strip().lower() == "/pegar":
+            print("Pegá el texto. Cuando termines escribí /fin en una línea sola.")
+            n = cerebro.aprender(leer_pegado(), fuente="texto pegado")
+            print(f"dios > Leído. Aprendí {n} oraciones nuevas.\n")
+            continue
         respuesta = procesar(cerebro, entrada)
         if respuesta is None:
             break
