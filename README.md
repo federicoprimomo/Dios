@@ -51,8 +51,8 @@ dios > Plutón fue degradado a planeta enano en 2006
 | `/aprender <texto>` | Aprende el texto que escribas |
 | `recordá que ...` / `aprendé que ...` | Otra forma de enseñarle algo mientras chateás |
 | `/imaginar [palabras]` | Inventa texto nuevo con el estilo de lo que leyó |
-| `/estado` | Cuánto sabe y de dónde lo aprendió |
-| `/olvidar` | Borra todo y vuelve a estar vacío |
+| `/estado` | Cuánto sabe, de dónde lo aprendió y desde cuándo |
+| `/olvidar si` | Vuelve a estar vacío (guarda una copia en `memoria/olvidados/`) |
 | `/salir` | Termina (lo aprendido queda guardado) |
 
 Cualquier otra cosa que escribas es una pregunta.
@@ -72,8 +72,16 @@ comunes. Cuanto más le das para leer, mejor distingue lo importante.
   empiezan igual, sin reglas del idioma.
 - **Lenguaje**: una cadena de Markov aprende qué palabra suele venir después de cada par de palabras.
   Con eso `/imaginar` escribe frases nuevas con el estilo de lo que leyó (pueden mezclar datos: es imaginación, no memoria).
-- **Persistencia**: todo se guarda en `memoria/cerebro.json`. Podés usar otro archivo con
-  `python -m dios --memoria otro_cerebro.json` para tener varios cerebros distintos.
+- **Acumulativo**: cada cosa que aprende se suma a lo anterior y queda guardada en `memoria/`:
+  - `cerebro.json`: todo lo que sabe, para arrancar rápido.
+  - `cerebro_diario.jsonl`: el diario de todo lo que leyó, en orden, con fecha. Nunca se borra.
+    Si `cerebro.json` se daña o se pierde, Dios lo reconstruye solo desde el diario.
+  - `/olvidar` no destruye nada: mueve la memoria a `memoria/olvidados/<fecha>/`.
+    Para recuperarla, copiá esos archivos de vuelta a `memoria/`.
+
+  Podés tener varios cerebros distintos con `python -m dios --memoria otro/cerebro.json`.
+  La carpeta `memoria/` no se sube a git (es tuya y privada); para llevarte el cerebro a
+  otra compu, copiá esa carpeta.
 
 ## Tests
 

@@ -14,7 +14,7 @@ Comandos:
   /pegar                      Pegás un texto largo (varias líneas) y lo aprendo; terminás con /fin
   /imaginar [palabras]        Invento texto con el estilo de lo que leí
   /estado                     Te cuento cuánto sé
-  /olvidar                    Borro todo lo aprendido (vuelvo a estar vacío)
+  /olvidar                    Vuelvo a estar vacío (guardo una copia de lo que sabía)
   /ayuda                      Muestra esta ayuda
   /salir                      Termina el chat
 
@@ -57,13 +57,19 @@ def procesar(cerebro: Cerebro, entrada: str) -> str | None:
         if comando == "/estado":
             e = cerebro.estado()
             fuentes = ", ".join(e["fuentes"]) or "nada todavía"
+            desde = f"\nVengo aprendiendo desde {e['desde'].replace('T', ' ')}." if e["desde"] else ""
             return (
                 f"Sé {e['oraciones']} oraciones y {e['palabras_distintas']} palabras distintas.\n"
-                f"Aprendí de: {fuentes}"
+                f"Aprendí de: {fuentes}{desde}"
             )
         if comando == "/olvidar":
-            cerebro.olvidar()
-            return "Olvidé todo. Vuelvo a estar vacío."
+            if argumento.lower() not in ("si", "sí"):
+                return (
+                    "¿Seguro? Voy a quedar vacío. Si estás seguro escribí: /olvidar si"
+                )
+            copia = cerebro.olvidar()
+            donde = f" Guardé una copia de lo que sabía en {copia}." if copia else ""
+            return "Olvidé todo. Vuelvo a estar vacío." + donde
         return f"No conozco el comando {comando}. Probá /ayuda."
 
     ensenanza = _ENSENAR.match(entrada)
@@ -101,6 +107,8 @@ def main() -> None:
     cerebro = Cerebro(args.memoria)
     e = cerebro.estado()
     print("=== Dios ===")
+    if cerebro.reconstruido:
+        print("(Mi memoria estaba dañada: la reconstruí desde el diario.)")
     if e["oraciones"]:
         print(f"Me acuerdo de {e['oraciones']} oraciones. Preguntame algo.")
     else:

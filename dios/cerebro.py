@@ -6,13 +6,17 @@ Tiene dos partes:
   * Lenguaje: una cadena de Markov que aprende cómo se encadenan las
     palabras, para "imaginar" texto nuevo con el estilo de lo que leyó.
 
-Todo se guarda en un archivo JSON, así lo aprendido se suma sesión tras sesión.
+Es acumulativo: todo se guarda y lo aprendido se suma sesión tras sesión.
+  * cerebro.json: el estado completo, para arrancar rápido.
+  * cerebro_diario.jsonl: cada cosa que leyó, anotada en orden y nunca borrada.
+    Si cerebro.json se pierde o se daña, el cerebro se reconstruye desde el diario.
 """
 
 import json
 import math
 import random
 import re
+import shutil
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -26,17 +30,35 @@ FIN = "\x03"  # marca de fin de oración en la cadena de Markov
 class Cerebro:
     def __init__(self, archivo: str | Path | None = None):
         self.archivo = Path(archivo) if archivo else None
+        self.diario = (
+            self.archivo.with_name(self.archivo.stem + "_diario.jsonl") if self.archivo else None
+        )
         self.lecturas: list[dict] = []  # historial de lo que leyó
         self.recuerdos: list[dict] = []  # oraciones: {"texto", "fuente"}
         self.cadena: dict[str, Counter] = defaultdict(Counter)
         self.inicios: Counter = Counter()
         self._reiniciar_indice()
+        self.reconstruido = False
         if self.archivo and self.archivo.exists():
-            self.cargar()
+            try:
+                self.cargar()
+            except (ValueError, KeyError, TypeError, OSError):
+                self._reconstruir_desde_diario()
+        elif self.diario and self.diario.exists():
+            self._reconstruir_desde_diario()
 
     # ------------------------------------------------------------ aprender
     def aprender(self, contenido: str, fuente: str = "chat") -> int:
-        """Incorpora un texto. Devuelve cuántas oraciones nuevas aprendió."""
+        """Incorpora un texto a lo que ya sabe. Devuelve cuántas oraciones nuevas aprendió."""
+        if not contenido.strip():
+            return 0
+        fecha = datetime.now().isoformat(timespec="seconds")
+        self._anotar_en_diario({"fecha": fecha, "fuente": fuente, "texto": contenido})
+        nuevas = self._incorporar(contenido, fuente, fecha)
+        self.guardar()
+        return nuevas
+
+    def _incorporar(self, contenido: str, fuente: str, fecha: str) -> int:
         vistas = {r["texto"] for r in self.recuerdos}
         nuevas = 0
         for oracion in tx.oraciones(contenido):
@@ -52,10 +74,9 @@ class Cerebro:
                 {
                     "fuente": fuente,
                     "oraciones": nuevas,
-                    "fecha": datetime.now().isoformat(timespec="seconds"),
+                    "fecha": fecha,
                 }
             )
-            self.guardar()
         return nuevas
 
     def leer_archivo(self, ruta: str | Path) -> int:
@@ -232,14 +253,27 @@ class Cerebro:
             "palabras_distintas": len(self._indice),
             "lecturas": len(self.lecturas),
             "fuentes": sorted({l["fuente"] for l in self.lecturas}),
+            "desde": self.lecturas[0]["fecha"] if self.lecturas else None,
         }
 
-    def olvidar(self) -> None:
-        """Vuelve a dejar el cerebro vacío."""
+    def olvidar(self) -> Path | None:
+        """Vuelve a dejar el cerebro vacío.
+
+        No borra nada: guarda una copia de lo aprendido en memoria/olvidados/
+        y devuelve esa carpeta, por si después lo querés recuperar.
+        """
+        copia = None
+        if self.archivo and any(p.exists() for p in (self.archivo, self.diario)):
+            marca = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            copia = self.archivo.parent / "olvidados" / marca
+            copia.mkdir(parents=True, exist_ok=True)
+            for p in (self.archivo, self.diario):
+                if p.exists():
+                    shutil.move(p, copia / p.name)
         self.lecturas, self.recuerdos = [], []
         self.cadena, self.inicios = defaultdict(Counter), Counter()
         self._reiniciar_indice()
-        self.guardar()
+        return copia
 
     # ------------------------------------------------------------ persistencia
     def guardar(self) -> None:
@@ -256,6 +290,28 @@ class Cerebro:
         temporal = self.archivo.with_suffix(".tmp")
         temporal.write_text(json.dumps(datos, ensure_ascii=False), encoding="utf-8")
         temporal.replace(self.archivo)
+
+    def _anotar_en_diario(self, entrada: dict) -> None:
+        if not self.diario:
+            return
+        self.diario.parent.mkdir(parents=True, exist_ok=True)
+        with self.diario.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
+
+    def _reconstruir_desde_diario(self) -> None:
+        """Vuelve a aprender, en orden, todo lo anotado en el diario."""
+        self.lecturas, self.recuerdos = [], []
+        self.cadena, self.inicios = defaultdict(Counter), Counter()
+        self._reiniciar_indice()
+        if self.diario and self.diario.exists():
+            for linea in self.diario.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(linea)
+                except ValueError:
+                    continue  # una línea dañada no arruina el resto
+                self._incorporar(e["texto"], e["fuente"], e["fecha"])
+        self.reconstruido = True
+        self.guardar()
 
     def cargar(self) -> None:
         datos = json.loads(self.archivo.read_text(encoding="utf-8"))

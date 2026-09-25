@@ -27,7 +27,7 @@ class TestCerebro(unittest.TestCase):
 
     def test_no_viene_preentrenado(self):
         c = Cerebro(self.archivo)
-        self.assertEqual(c.estado(), {"oraciones": 0, "palabras_distintas": 0, "lecturas": 0, "fuentes": []})
+        self.assertEqual(c.estado(), {"oraciones": 0, "palabras_distintas": 0, "lecturas": 0, "fuentes": [], "desde": None})
         self.assertIn("No tengo palabras", c.imaginar())
 
     def test_aprende_un_idioma_inventado(self):
@@ -64,11 +64,47 @@ class TestCerebro(unittest.TestCase):
         self.assertIn("Júpiter", c.responder("¿Cuál es el planeta más grande?"))
         self.assertTrue(c.imaginar())
 
-    def test_olvidar(self):
+    def test_acumula_en_muchas_sesiones(self):
+        for dia in range(1, 6):
+            Cerebro(self.archivo).aprender(f"El dato número {dia} es importante.")
+        c = Cerebro(self.archivo)
+        self.assertEqual(c.estado()["oraciones"], 5)
+        self.assertEqual(c.estado()["lecturas"], 5)
+        self.assertIn("número 1", c.responder("dato 1"))
+        self.assertIn("número 5", c.responder("dato 5"))
+
+    def test_se_reconstruye_si_la_memoria_se_dana(self):
+        Cerebro(self.archivo).aprender("Toby es mi perro.")
+        Cerebro(self.archivo).aprender("Michi es mi gato.")
+        self.archivo.write_text("{basura", encoding="utf-8")
+        c = Cerebro(self.archivo)
+        self.assertTrue(c.reconstruido)
+        self.assertIn("Toby", c.responder("Toby"))
+        self.assertIn("Michi", c.responder("Michi"))
+        # y quedó sano para la próxima
+        self.assertFalse(Cerebro(self.archivo).reconstruido)
+
+    def test_se_reconstruye_si_la_memoria_se_borra(self):
+        Cerebro(self.archivo).aprender("Toby es mi perro.")
+        self.archivo.unlink()
+        self.assertIn("Toby", Cerebro(self.archivo).responder("Toby"))
+
+    def test_olvidar_guarda_una_copia(self):
         c = Cerebro(self.archivo)
         c.aprender("Algo para olvidar.")
-        c.olvidar()
+        copia = c.olvidar()
         self.assertEqual(Cerebro(self.archivo).estado()["oraciones"], 0)
+        self.assertTrue((copia / "cerebro_diario.jsonl").exists())
+        # después de olvidar vuelve a acumular desde cero
+        c.aprender("Algo nuevo.")
+        self.assertEqual(Cerebro(self.archivo).estado()["oraciones"], 1)
+
+    def test_olvidar_pide_confirmacion(self):
+        c = Cerebro(self.archivo)
+        c.aprender("No me olvides.")
+        self.assertIn("Seguro", procesar(c, "/olvidar"))
+        self.assertEqual(Cerebro(self.archivo).estado()["oraciones"], 1)
+        self.assertIn("Olvidé", procesar(c, "/olvidar si"))
 
     def test_chat_ensenar_con_frase(self):
         c = Cerebro(self.archivo)
