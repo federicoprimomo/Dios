@@ -121,11 +121,20 @@ class Cerebro:
                 "No aprendí nada sobre eso todavía. "
                 "Si me lo enseñás (/aprender ...), la próxima te sé responder."
             )
+        buscadas = set(tx.claves(pregunta))
+
+        def cobertura(i: int) -> int:
+            return len(buscadas & set(tx.claves(self.recuerdos[i]["texto"])))
+
+        # Nos quedamos con las oraciones que cubren más palabras de la pregunta
+        # y que tienen un puntaje parecido al de la mejor.
+        maxima = max(cobertura(i) for _, i in encontrados)
         mejor = encontrados[0][0]
-        elegidos = [i for p, i in encontrados if p >= mejor * 0.6][:3]
+        elegidos = [
+            i for p, i in encontrados if p >= mejor * 0.6 and cobertura(i) == maxima
+        ][:3]
         # Sumamos la oración que sigue en el mismo texto si también habla del tema:
         # muchas veces la respuesta continúa ahí ("Se hace cocinando...").
-        buscadas = set(tx.claves(pregunta))
         con_contexto = []
         for i in elegidos:
             if i not in con_contexto:

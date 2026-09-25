@@ -51,6 +51,10 @@ class TestLectores(unittest.TestCase):
         self.assertEqual(
             self.cerebro.estado()["fuentes"], ["oceanos.pdf", "sistema_solar.txt"]
         )
+        # no mezcla temas: "grande" aparece también en los océanos
+        respuesta = self.cerebro.responder("¿Cuál es el planeta más grande?")
+        self.assertIn("Júpiter", respuesta)
+        self.assertNotIn("océano", respuesta)
 
     def test_pegar_texto(self):
         lineas = iter(["El mate se toma con yerba.", "Es muy popular en Argentina.", "/fin"])
