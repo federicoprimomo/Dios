@@ -1,9 +1,9 @@
 """La red neuronal de Dios: un transformer chico, como los de los modelos de lenguaje.
 
-Lee el texto de a bytes (cada letra o signo es uno o más bytes), así que no
-necesita ningún vocabulario ni diccionario armado de antemano: los 256 bytes
-posibles son todo lo que conoce al nacer. Empieza con pesos al azar y todo lo
-demás lo aprende entrenándose con lo que le das.
+Lee el texto en piezas (pedazos de palabra) que descubre el tokenizador a partir
+de lo que lee. Al nacer sólo conoce los 256 bytes (letras sueltas) y tiene lugar
+reservado para las piezas que vaya descubriendo. Empieza con pesos al azar y todo
+lo demás lo aprende entrenándose con lo que le das.
 """
 
 import math
@@ -13,12 +13,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-VOCABULARIO = 256  # un byte = 256 valores posibles
-
-
 @dataclass
 class Config:
-    contexto: int = 256  # cuántos bytes hacia atrás puede mirar
+    tokens: int = 4096  # cuántas piezas distintas puede llegar a conocer
+    contexto: int = 256  # cuántas piezas hacia atrás puede mirar
     capas: int = 4
     cabezas: int = 4
     dimension: int = 192
@@ -29,10 +27,10 @@ class Config:
 
 
 TAMANOS = {
-    "diminuto": Config(contexto=64, capas=2, cabezas=2, dimension=64, abandono=0.0),
-    "chico": Config(contexto=128, capas=3, cabezas=4, dimension=128),
-    "mediano": Config(),
-    "grande": Config(contexto=512, capas=8, cabezas=8, dimension=384),
+    "diminuto": Config(tokens=512, contexto=64, capas=2, cabezas=2, dimension=64, abandono=0.0),
+    "chico": Config(tokens=1024, contexto=128, capas=3, cabezas=4, dimension=128, abandono=0.2),
+    "mediano": Config(tokens=2048, abandono=0.2),
+    "grande": Config(tokens=4096, contexto=512, capas=8, cabezas=8, dimension=384),
 }
 
 
@@ -75,18 +73,18 @@ class Bloque(nn.Module):
 
 
 class Red(nn.Module):
-    """Predice cuál es el próximo byte a partir de los anteriores."""
+    """Predice cuál es la próxima pieza a partir de las anteriores."""
 
     def __init__(self, c: Config):
         super().__init__()
         self.config = c
-        self.letras = nn.Embedding(VOCABULARIO, c.dimension)
+        self.piezas = nn.Embedding(c.tokens, c.dimension)
         self.posiciones = nn.Embedding(c.contexto, c.dimension)
         self.abandono = nn.Dropout(c.abandono)
         self.bloques = nn.ModuleList(Bloque(c) for _ in range(c.capas))
         self.norma = nn.LayerNorm(c.dimension)
-        self.cabeza = nn.Linear(c.dimension, VOCABULARIO, bias=False)
-        self.cabeza.weight = self.letras.weight  # comparten pesos (menos parámetros)
+        self.cabeza = nn.Linear(c.dimension, c.tokens, bias=False)
+        self.cabeza.weight = self.piezas.weight  # comparten pesos (menos parámetros)
         self.apply(self._iniciar_al_azar)
 
     @staticmethod
@@ -102,36 +100,50 @@ class Red(nn.Module):
     def forward(self, entrada, objetivo=None):
         _, t = entrada.shape
         pos = torch.arange(t, device=entrada.device)
-        x = self.abandono(self.letras(entrada) + self.posiciones(pos))
+        x = self.abandono(self.piezas(entrada) + self.posiciones(pos))
         for bloque in self.bloques:
             x = bloque(x)
         logits = self.cabeza(self.norma(x))
         perdida = None
         if objetivo is not None:
-            perdida = F.cross_entropy(logits.view(-1, VOCABULARIO), objetivo.view(-1))
+            perdida = F.cross_entropy(logits.reshape(-1, logits.size(-1)), objetivo.reshape(-1))
         return logits, perdida
 
     @torch.no_grad()
-    def generar(self, inicio: bytes, largo: int = 300, temperatura: float = 0.8,
-                parar_en: bytes | None = None) -> bytes:
-        """Escribe byte a byte, eligiendo cada uno según lo que aprendió."""
+    def presentar_piezas(self, nuevas: list[int], partes: list[tuple[int, int]]) -> None:
+        """Una pieza nueva arranca a mitad de camino entre las dos que la forman."""
+        for nueva, (a, b) in zip(nuevas, partes):
+            self.piezas.weight[nueva] = (self.piezas.weight[a] + self.piezas.weight[b]) / 2
+
+    @torch.no_grad()
+    def generar(self, inicio: list[int], activas: int, largo: int = 150, temperatura: float = 0.8,
+                mejores: int = 40, parar=None) -> list[int]:
+        """Escribe pieza por pieza, eligiendo cada una según lo que aprendió.
+
+        activas: cuántas piezas conoce hasta ahora (las demás no las puede usar).
+        mejores: sólo elige entre las piezas más probables (evita disparates).
+        parar: función que recibe lo escrito y dice si ya terminó.
+        """
         self.eval()
         dispositivo = next(self.parameters()).device
-        x = torch.tensor([list(inicio) or [10]], dtype=torch.long, device=dispositivo)
-        nuevos = bytearray()
+        x = torch.tensor([inicio or [10]], dtype=torch.long, device=dispositivo)
+        nuevos: list[int] = []
         for _ in range(largo):
             logits, _ = self(x[:, -self.config.contexto:])
-            probabilidades = F.softmax(logits[0, -1] / max(temperatura, 1e-3), dim=-1)
-            siguiente = torch.multinomial(probabilidades, 1)
+            logits = logits[0, -1, :activas] / max(temperatura, 1e-3)
+            if mejores and mejores < activas:
+                corte = torch.topk(logits, mejores).values[-1]
+                logits = logits.masked_fill(logits < corte, float("-inf"))
+            siguiente = torch.multinomial(F.softmax(logits, dim=-1), 1)
             nuevos.append(siguiente.item())
-            if parar_en and nuevos.endswith(parar_en):
+            if parar and parar(nuevos):
                 break
             x = torch.cat([x, siguiente.view(1, 1)], dim=1)
-        return bytes(nuevos)
+        return nuevos
 
 
 def perdida_a_texto(perdida: float | None) -> str:
-    """Traduce la pérdida (qué tan mal predice) a algo entendible."""
+    """Traduce la pérdida por letra (qué tan mal predice) a algo entendible."""
     if perdida is None:
         return "todavía no entrené nada"
     # la perplejidad es "entre cuántos bytes duda" en promedio al escribir

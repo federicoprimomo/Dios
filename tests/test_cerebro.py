@@ -35,7 +35,7 @@ class TestCerebro(unittest.TestCase):
         self.assertIn("vacío", c.responder("hola"))
         # dos redes recién nacidas son distintas: pesos al azar, nada preentrenado
         otra = Cerebro(tamano="diminuto")
-        self.assertFalse(torch.equal(c.red.letras.weight, otra.red.letras.weight))
+        self.assertFalse(torch.equal(c.red.piezas.weight, otra.red.piezas.weight))
 
     def test_aprende_de_lo_que_lee(self):
         c = self.nuevo()
@@ -48,10 +48,10 @@ class TestCerebro(unittest.TestCase):
     def test_acumula_entre_sesiones(self):
         c = self.nuevo()
         c.aprender("Primer texto.", pasos=10)
-        pesos = c.red.letras.weight.detach().clone()
+        pesos = c.red.piezas.weight.detach().clone()
         c = self.nuevo()  # otra sesión
         self.assertEqual(c.pasos, 10)
-        self.assertTrue(torch.equal(c.red.letras.weight, pesos))
+        self.assertTrue(torch.equal(c.red.piezas.weight, pesos))
         c.aprender("Segundo texto.", pasos=10)
         c = self.nuevo()
         self.assertEqual(c.pasos, 20)
@@ -61,12 +61,69 @@ class TestCerebro(unittest.TestCase):
 
     def test_repasa_lo_viejo_al_aprender_lo_nuevo(self):
         c = self.nuevo()
-        c.aprender("a" * 500, pasos=1)
-        desde = c._incorporar("b" * 500, "x", "f")
+        viejo = " ".join("".join(random.choices("aeiou", k=3)) for _ in range(300))
+        nuevo = " ".join("".join(random.choices("bcdfg", k=3)) for _ in range(300))
+        c.aprender(viejo, pasos=1)
+        desde = c._incorporar(nuevo, "x", "f")
         x, _ = c._lote(32, desde)
-        filas_viejas = sum(1 for fila in x.tolist() if ord("a") in fila)
-        self.assertGreaterEqual(filas_viejas, 8)  # repasa lo anterior
-        self.assertGreaterEqual(32 - filas_viejas, 8)  # y estudia lo nuevo
+        filas = [c.tokenizador.decodificar(fila) for fila in x.tolist()]
+        vocales, consonantes = set(b"aeiou"), set(b"bcdfg")
+        viejas = sum(1 for f in filas if set(f) & vocales and not set(f) & consonantes)
+        nuevas = sum(1 for f in filas if set(f) & consonantes and not set(f) & vocales)
+        self.assertGreaterEqual(viejas, 8)  # repasa lo anterior
+        self.assertGreaterEqual(nuevas, 8)  # y estudia lo nuevo
+
+    def test_descubre_piezas_de_palabra(self):
+        c = self.nuevo()
+        self.assertEqual(c.estado()["piezas"], 256)  # al nacer: sólo letras sueltas
+        c.aprender(REPETIDO, pasos=1)
+        self.assertLess(c.estado()["piezas"], 270)  # con poco texto, pocas piezas
+        c.aprender(REPETIDO * 20, pasos=1)
+        piezas = {p.decode("utf-8", "replace") for p in c.tokenizador.piezas}
+        self.assertIn(" gato", piezas)
+        self.assertGreater(c.estado()["piezas"], 256)
+        # vuelven iguales al abrirlo de nuevo
+        self.assertEqual(self.nuevo().tokenizador.uniones, c.tokenizador.uniones)
+
+    def test_mide_con_texto_apartado(self):
+        c = self.nuevo()
+        texto = " ".join(f"El número {i} viene después del {i - 1}." for i in range(1, 300))
+        c.aprender(texto, pasos=30)
+        e = c.estado()
+        self.assertIsNotNone(e["perdida_aparte"])
+        self.assertGreater(len(c._aparte), 0)
+        # lo apartado nunca aparece en lo que estudia
+        final = c.tokenizador.decodificar(c._aparte.tolist())
+        self.assertNotIn(final, c.tokenizador.decodificar(c._estudio.tolist()))
+
+    def test_freno_automatico_si_memoriza(self):
+        import dios.cerebro as modulo
+        viejo, modulo.REVISAR_CADA = modulo.REVISAR_CADA, 25
+        try:
+            c = self.nuevo()
+            palabras = ["".join(random.choices("abcdefghij", k=5)) for _ in range(900)]
+            c.aprender(" ".join(palabras), pasos=1)  # texto al azar: sólo se puede memorizar
+            c.entrenar(3000)
+            self.assertIsNotNone(c.frenado_en)
+            self.assertLess(c.frenado_en, 3000)
+            self.assertIn("Frené", Chat(c, progreso=None).aprendido(c.frenado_en))
+        finally:
+            modulo.REVISAR_CADA = viejo
+
+    def test_se_actualiza_desde_una_version_vieja(self):
+        self.nuevo().aprender("Toby es mi perro.", pasos=5)
+        datos = torch.load(self.archivo, weights_only=True)
+        datos["version"] = 2
+        torch.save(datos, self.archivo)
+        avisos = []
+        c = Cerebro(self.archivo, tamano="diminuto", avisar=avisos.append)
+        self.assertTrue(c.actualizado)
+        self.assertIn("versión nueva", avisos[0])
+        self.assertIn(b"Toby", c.corpus)
+        self.assertGreater(c.pasos, 0)
+        guardados = list((Path(self.tmp.name) / "olvidados").glob("*/cerebro.pt"))
+        self.assertEqual(len(guardados), 1)
+        self.assertFalse(self.nuevo().actualizado)
 
     def test_se_reconstruye_si_la_memoria_se_dana(self):
         self.nuevo().aprender("Toby es mi perro.", pasos=5)

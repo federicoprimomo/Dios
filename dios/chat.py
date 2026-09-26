@@ -52,7 +52,19 @@ class Chat:
         self.temperatura = 0.8
 
     def aprendido(self, pasos: int) -> str:
-        return f"Me entrené {pasos} pasos. Ahora {perdida_a_texto(self.cerebro.perdida)}."
+        c = self.cerebro
+        e = c.estado()
+        texto = f"Me entrené {pasos} pasos."
+        if c.frenado_en:
+            if self.progreso:
+                sys.stderr.write("\n")
+            texto += (
+                " Frené antes: seguir entrenando me hacía memorizar en vez de aprender, "
+                "así que volví a mi mejor momento. Para mejorar, dame más texto para leer."
+            )
+        if e["perdida_aparte"] is not None:
+            return texto + f" Con texto que no estudié: {perdida_a_texto(e['perdida_aparte'])}."
+        return texto + f" Ahora {perdida_a_texto(e['perdida'])}."
 
     def procesar(self, entrada: str) -> str | None:
         """Procesa una línea del usuario y devuelve la respuesta (None = salir)."""
@@ -101,12 +113,24 @@ class Chat:
                 desde = (
                     f"\nVengo aprendiendo desde {e['desde'].replace('T', ' ')}." if e["desde"] else ""
                 )
+                if e["perdida_aparte"] is None:
+                    medida = "Todavía no tengo texto apartado para medirme (dame textos más largos)."
+                else:
+                    medida = (
+                        f"Con texto que nunca estudié: {perdida_a_texto(e['perdida_aparte'])}."
+                    )
+                    if e["memorizando"]:
+                        medida += (
+                            "\n⚠ Estoy empezando a memorizar en vez de aprender: "
+                            "conviene darme más texto en vez de entrenarme más."
+                        )
                 return (
                     f"Soy una red neuronal de {_miles(e['parametros'])} parámetros, tamaño {e['tamano']} "
                     f"(corriendo en {e['dispositivo']}).\n"
                     f"Leí {_miles(e['bytes_leidos'])} bytes de: {fuentes}.\n"
-                    f"Me entrené {_miles(e['pasos'])} pasos. Ahora {perdida_a_texto(e['perdida'])}."
-                    f"{desde}"
+                    f"Descubrí {_miles(e['piezas'])} piezas de palabra.\n"
+                    f"Me entrené {_miles(e['pasos'])} pasos. Con lo que estudié: "
+                    f"{perdida_a_texto(e['perdida'])}.\n{medida}{desde}"
                 )
             if comando == "/olvidar":
                 fuentes = c.estado()["fuentes"]
@@ -167,12 +191,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cerebro = Cerebro(args.memoria, tamano=args.tamano, progreso=barra)
+    print("=== Dios ===")
+    cerebro = Cerebro(args.memoria, tamano=args.tamano, progreso=barra,
+                      avisar=lambda texto: print(f"({texto})"))
     chat = Chat(cerebro)
     e = cerebro.estado()
-    print("=== Dios ===")
-    if cerebro.reconstruido:
-        print("(Mi memoria estaba dañada: me volví a entrenar con el diario.)")
     if e["pasos"]:
         print(f"Me entrené {_miles(e['pasos'])} pasos. {perdida_a_texto(e['perdida']).capitalize()}.")
     else:

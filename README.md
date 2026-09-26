@@ -5,7 +5,8 @@ Es del mismo tipo que los modelos de lenguaje como Claude o ChatGPT (un *transfo
 pero en miniatura, y con una diferencia clave: **no viene preentrenada**.
 
 - Nace con pesos al azar: no sabe ni una letra, ni una palabra, ni un idioma.
-- Lee de a bytes, así que ni siquiera trae un vocabulario armado.
+- Ni siquiera trae un vocabulario: al nacer sólo conoce letras sueltas, y va descubriendo
+  sola las palabras y pedazos de palabra que más se repiten en lo que lee.
 - Todo lo que sabe lo aprende entrenándose con los textos y PDFs que vos le das.
 - Es **acumulativa**: cada cosa nueva se suma a lo que ya sabía, sesión tras sesión.
 
@@ -29,18 +30,18 @@ también con doble clic en `chatear.py`. Si estás parado en la carpeta del proy
 
 ```
 === Dios ===
-Acabo de nacer: soy una red de 644.224 parámetros al azar. No sé nada.
+Acabo de nacer: soy una red de 742.528 parámetros al azar. No sé nada.
 
 vos > /leer quijote.txt
-  entrenando [##############################] 2000/2000  pérdida 1.45
-dios > Leí quijote.txt. Me entrené 2000 pasos. Ahora escribo palabras y frases con forma.
+  entrenando [##############################] 2000/2000  pérdida 1.30
+dios > Leí quijote.txt. Me entrené 2000 pasos. Con texto que no estudié: escribo palabras y frases con forma (dudo entre ~4.1 opciones por letra).
 
 vos > /entrenar 3000
-  entrenando [##############################] 3000/3000  pérdida 1.30
-dios > Me entrené 3000 pasos. Ahora escribo palabras y frases con forma.
+  entrenando [##########....................] 1000/3000  pérdida 1.25
+dios > Me entrené 1000 pasos. Frené antes: seguir entrenando me hacía memorizar en vez de aprender, así que volví a mi mejor momento. Para mejorar, dame más texto para leer.
 
-vos > Don Quijote
-dios > (continúa el texto con el estilo de lo que leyó)
+vos > —¿Quién sois vos? —dijo Sancho.
+dios > — No lo mandó eso —respondió don Quijote—, y por lo que me ha de ser de muestras mercedas y a mano.
 ```
 
 ## Comandos
@@ -110,20 +111,31 @@ dios > Ana: bien, cansada jaja. vos?
 Se elige al nacer (después no se puede cambiar sin `/olvidar`):
 
 ```bash
-python -m dios --tamano chico      # 0,6 M parámetros (por defecto)
-python -m dios --tamano mediano    # 1,9 M: aprende mejor, ~4 veces más lenta
-python -m dios --tamano grande     # 14 M: necesita placa de video
+python -m dios --tamano chico      # 0,7 M parámetros (por defecto)
+python -m dios --tamano mediano    # 2,2 M: aprende mejor, ~4 veces más lenta
+python -m dios --tamano grande     # 16 M: necesita placa de video
 python -m dios --tamano diminuto   # para compus muy lentas o para probar
 ```
 
 ## Cómo funciona por dentro
 
-- **La red** (`dios/red.py`): un transformer que mira los últimos bytes y predice el próximo.
-  Entrenar es ajustar sus pesos para que prediga cada vez mejor el texto que leyó.
-  Escribir es predecir un byte, agregarlo, y repetir.
+- **Piezas de palabra** (`dios/tokenizador.py`): al leer algo, Dios busca qué pares de letras
+  o pedazos aparecen juntos más seguido y los une en una pieza nueva, una y otra vez
+  (`c`+`a` → `ca`, `ca`+`sa` → `casa`). Así arma su propio vocabulario con tus textos:
+  de tu chat saca `jaja` o ` amor`, de un libro ` Mancha` o ` quiero`. Es la misma técnica
+  (BPE) que usan los modelos grandes, pero aprendida sólo con lo que vos le das.
+  Cualquier palabra que no conozca la puede escribir igual, letra por letra.
+- **La red** (`dios/red.py`): un transformer que mira las últimas piezas (128 en el tamaño
+  chico, unas 80 palabras) y predice la próxima. Entrenar es ajustar sus pesos para que
+  prediga cada vez mejor el texto que leyó. Escribir es predecir una pieza, agregarla y
+  repetir, eligiendo siempre entre las 40 más probables para no decir disparates.
 - **Aprendizaje acumulativo** (`dios/cerebro.py`): cuando le das algo nuevo, la mitad de
   cada tanda de estudio es con lo nuevo y la otra mitad repasa lo que ya había leído.
   Así no se olvida de lo anterior (a las redes neuronales les pasa si sólo estudian lo nuevo).
+- **Medirse con honestidad**: de cada texto largo aparta el 5% final y nunca lo estudia.
+  `/estado` muestra qué tan bien predice ese texto que nunca vio. Si le va mucho mejor con
+  lo estudiado que con lo apartado, te avisa que está memorizando: en ese caso conviene
+  darle más texto en vez de entrenarla más.
 - **Memoria** en la carpeta `memoria/`:
   - `cerebro.pt`: los pesos de la red, o sea, lo que aprendió.
   - `cerebro_diario.jsonl`: todo lo que leyó, en orden y con fecha. Nunca se borra.
@@ -131,6 +143,14 @@ python -m dios --tamano diminuto   # para compus muy lentas o para probar
 
   La carpeta `memoria/` no se sube a git (es tuya y privada). Para llevarte el cerebro a
   otra compu, copiá esa carpeta.
+
+## Actualizaciones
+
+Si una versión nueva de Dios cambia cómo funciona la red por dentro, el cerebro viejo no
+sirve más. Al abrirla, Dios se da cuenta solo: guarda el cerebro viejo en
+`memoria/olvidados/` y vuelve a leer y estudiar todo lo del diario. No perdés nada de lo
+que le diste, pero tarda lo mismo que la primera vez (con Ctrl+C lo podés cortar y seguir
+después con `/entrenar`).
 
 ## Tests
 
